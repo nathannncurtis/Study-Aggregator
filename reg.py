@@ -2,7 +2,7 @@ import os
 import winreg
 
 def add_context_menu():
-    # Path to your EXE in the AppData\Roaming\Study Aggregator folder
+    # Path to your EXE in the %appdata%\Study Aggregator folder
     exe_path = os.path.join(os.getenv('APPDATA'), 'Study Aggregator', 'Study Aggregator.exe')
     
     # Context menu entry name and command to run
