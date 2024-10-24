@@ -6,28 +6,24 @@ from collections import defaultdict
 import pyzipper
 import shutil
 import tempfile
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMessageBox, QInputDialog, QLineEdit
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 import time
-import sys  
-import ctypes  
+import sys
+import ctypes
+import zipfile
 
-# Load Windows user32.dll for cursor manipulation
 user32 = ctypes.WinDLL('user32', use_last_error=True)
 
-# Function to set the system-wide cursor to busy (hourglass/spinning)
 def set_busy_cursor():
-    user32.SetSystemCursor(user32.LoadCursorW(0, 32514), 32512)  # 32514 is IDC_WAIT (busy cursor)
+    user32.SetSystemCursor(user32.LoadCursorW(0, 32514), 32512)
 
-# Function to reset the system-wide cursor back to the default
 def reset_cursor():
-    user32.SystemParametersInfoW(87, 0, None, 0)  # 87 is SPI_SETCURSORS, which resets all cursors to default
+    user32.SystemParametersInfoW(87, 0, None, 0)
 
-# Relative path to ico file
 icon_path = os.path.join(os.path.dirname(__file__), 'agg.ico')
 
-# Function to display an error popup using PyQt5, always on top
 def show_error_popup(message):
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Critical)
@@ -37,7 +33,6 @@ def show_error_popup(message):
     msg.setWindowFlag(Qt.WindowStaysOnTopHint)
     msg.exec_()
 
-# Function to display a success popup using PyQt5, always on top
 def show_success_popup(message):
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Information)
@@ -47,159 +42,150 @@ def show_success_popup(message):
     msg.setWindowFlag(Qt.WindowStaysOnTopHint)
     msg.exec_()
 
-# Function to check if a file is a DICOM file
 def is_valid_dicom_file(file_path):
-    try:
-        with open(file_path, 'rb') as f:
-            f.seek(128)
-            return f.read(4) == b'DICM'
-    except Exception:
-        return False
+    with open(file_path, 'rb') as f:
+        f.seek(128)
+        return f.read(4) == b'DICM'
 
-# Function to extract and format study information from a DICOM file
 def extract_study_info(dicom_file):
-    try:
-        ds = pydicom.dcmread(dicom_file, force=True)
+    ds = pydicom.dcmread(dicom_file, force=True)
+    
+    if not hasattr(ds, 'PixelData'):
+        return None
 
-        if not hasattr(ds, 'PixelData'):
-            return None
+    study_date = ds.get("StudyDate", "Unknown")
+    study_description = ds.get("StudyDescription", "Unknown")
+    series_description = ds.get("SeriesDescription", "Unknown")
 
-        study_date = ds.get("StudyDate", "Unknown")
-        study_description = ds.get("StudyDescription", "Unknown")
-        series_description = ds.get("SeriesDescription", "Unknown")
+    if study_date != "Unknown":
+        study_date = datetime.strptime(study_date, "%Y%m%d").strftime("%m-%d-%Y")
 
-        if study_date != "Unknown":
-            study_date = datetime.strptime(study_date, "%Y%m%d").strftime("%m-%d-%Y")
-
-        if study_description == "Unknown" or not study_description.strip():
-            for element in ds:
-                if element.VR == "LO" or element.VR == "SH":
-                    if "Study" in element.name or "Series" in element.name:
-                        study_description = element.value
-                        break
-
-        if (study_description == "Unknown" or not study_description.strip()) and series_description != "Unknown":
-            study_description = series_description
-
-        if study_description and len(study_description) > 10 and study_description.isalnum():
-            study_description = "Unknown"
-
-        if not study_description.strip():
-            study_description = "Unknown"
-
-        return (study_date, study_description)
-    except pydicom.errors.InvalidDicomError as e:
-        print(f"Invalid DICOM file {dicom_file}: {e}")
-    except FileNotFoundError as e:
-        print(f"File not found: {dicom_file}. Error: {e}")
-    except Exception as e:
-        print(f"Error reading {dicom_file}: {e}")
-    return None
-
-# Function to process DICOM files from zip archives
-def process_zip_file(zip_path, study_data, app):
-    try:
-        with pyzipper.AESZipFile(zip_path, 'r') as zip_ref:
-            password = None
-            is_encrypted = False
-
-            for file_info in zip_ref.infolist():
-                if file_info.flag_bits & 0x1:
-                    is_encrypted = True
-                    print(f"File {file_info.filename} is encrypted.")
+    if study_description == "Unknown" or not study_description.strip():
+        for element in ds:
+            if element.VR == "LO" or element.VR == "SH":
+                if "Study" in element.name or "Series" in element.name:
+                    study_description = element.value
                     break
 
-            if is_encrypted:
-                password = input(f"Enter password for encrypted zip file {zip_path}: ")
+    if (study_description == "Unknown" or not study_description.strip()) and series_description != "Unknown":
+        study_description = series_description
 
-            temp_dir = tempfile.mkdtemp()
+    if study_description and len(study_description) > 10 and study_description.isalnum():
+        study_description = "Unknown"
 
-            try:
-                print(f"Extracting files from {zip_path} to {temp_dir}...")
+    if not study_description.strip():
+        study_description = "Unknown"
 
-                for file_name in zip_ref.namelist():
-                    try:
-                        extract_path = os.path.join(temp_dir, file_name)
+    return (study_date, study_description)
 
-                        if file_name.endswith('/'):
-                            os.makedirs(extract_path, exist_ok=True)
-                            continue
+def get_password_from_gui(zip_path):
+    password, ok = QInputDialog.getText(None, 'Password Required', f'Enter password for encrypted zip file {zip_path}:', QLineEdit.Password)
+    if ok:
+        return password.encode()  # Return the password encoded as bytes
+    return None
 
-                        os.makedirs(os.path.dirname(extract_path), exist_ok=True)
+def process_zip_file(zip_path, app):
+    found_studies = defaultdict(set)  # Change to defaultdict for correct structure
+    password = get_password_from_gui(zip_path)
 
-                        if is_encrypted and password:
-                            with zip_ref.open(file_name, pwd=password.encode()) as source_file:
-                                with open(extract_path, 'wb') as target_file:
-                                    shutil.copyfileobj(source_file, target_file)
-                        else:
-                            with zip_ref.open(file_name) as source_file:
-                                with open(extract_path, 'wb') as target_file:
-                                    shutil.copyfileobj(source_file, target_file)
+    if password is None:
+        print("No password provided.")
+        return found_studies  # Return an empty defaultdict if no password is provided
 
-                    except Exception as e:
-                        print(f"Error extracting {file_name}: {e}")
+    temp_dir = tempfile.mkdtemp()
+    print(f"Extracting {zip_path} to temporary directory...")
 
-                print(f"Processing extracted files in {temp_dir}...")
+    try:
+        with pyzipper.AESZipFile(zip_path) as zf:
+            zf.extractall(temp_dir, pwd=password)
+    except (RuntimeError, zipfile.BadZipFile):
+        print("Failed to extract zip file, incorrect password or corruption.")
+        shutil.rmtree(temp_dir)
+        return found_studies
 
-                for root, _, files in os.walk(temp_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if file.endswith(".dcm") or not os.path.splitext(file)[1]:
-                            study_info = extract_study_info(file_path)
-                            if study_info:
-                                study_data[study_info].add(zip_path)
-
-            finally:
-                print(f"Cleaning up temporary directory {temp_dir}...")
-                shutil.rmtree(temp_dir)
-
-    except FileNotFoundError as e:
-        print(f"File not found: {zip_path}. Error: {e}")
-    except Exception as e:
-        print(f"Error processing zip file {zip_path}: {e}")
-
-# Iterate through the directory and extract information from each DICOM file
-def extract_directory_info(directory, app):
-    study_data = defaultdict(set)
-
-    for root, _, files in os.walk(directory):
+    print(f"Processing extracted files from {zip_path}...")
+    for root, _, files in os.walk(temp_dir):
         for file in files:
             file_path = os.path.join(root, file)
-            app.processEvents()  # Keep UI responsive
-            
-            if file.lower().endswith(('.dcm', '.zip')) or is_valid_dicom_file(file_path):
-                if file.endswith(".dcm") or not os.path.splitext(file)[1]:
+            app.processEvents()
+
+            if file.endswith(".dcm") or not os.path.splitext(file)[1]:
+                try:
                     study_info = extract_study_info(file_path)
                     if study_info:
-                        study_data[study_info].add(file_path)
-                elif file.endswith(".zip"):
-                    process_zip_file(file_path, study_data, app)
+                        found_studies[study_info].add(zip_path)  # Add zip path to study info
+                except:
+                    continue
 
+    shutil.rmtree(temp_dir)
+    return found_studies  # Return defaultdict (which behaves like a dict)
+
+def extract_directory_info(directory, app):
+    study_data = defaultdict(set)
+    zip_files = []
+
+    # 1. Find all zip files first
+    print("Scanning for zip files...")
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.zip'):
+                zip_files.append(os.path.join(root, file))
+
+    # 2. Process each zip file
+    for zip_path in zip_files:
+        print(f"\nProcessing zip file: {zip_path}")
+        found_studies = process_zip_file(zip_path, app)
+        for study_info, path in found_studies:
+            study_data[study_info].add(path)
+
+    # Only check for regular DICOM files if no zip files found
+    if not zip_files:
+        print("No zip files found, scanning for individual DICOM files...")
+        for root, _, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                app.processEvents()
+                
+                if file.endswith(".dcm") or is_valid_dicom_file(file_path):
+                    try:
+                        study_info = extract_study_info(file_path)
+                        if study_info:
+                            study_data[study_info].add(file_path)
+                    except:
+                        continue
+
+    # Only show error if no studies found after all processing
     if not study_data:
         show_error_popup("No valid studies were found in the selected directory.")
         return False
 
     return study_data
 
-# Main function to process DICOM files
 def main():
-    app = QApplication([])
-
-    # Set the global busy cursor
+    app = QApplication([])  # Ensure QApplication is running
     set_busy_cursor()
 
-    # Check if the path is provided as a command-line argument
     if len(sys.argv) < 2:
-        print("Usage: script.py <path_to_directory>")
-        reset_cursor()  # Reset the cursor if there's an error
+        print("Usage: script.py <path_to_directory_or_zip_file>")
+        reset_cursor()
         sys.exit(1)
 
-    dicom_directory = sys.argv[1]  # Get the directory path from command-line arguments
+    input_path = sys.argv[1]
 
     try:
         start_time = time.time()
 
-        study_data = extract_directory_info(dicom_directory, app)
+        # Check if the input path is a zip file or a directory
+        if os.path.isfile(input_path) and input_path.endswith('.zip'):
+            print(f"Processing single zip file: {input_path}")
+            study_data = process_zip_file(input_path, app)
+        elif os.path.isdir(input_path):
+            print(f"Processing directory: {input_path}")
+            study_data = extract_directory_info(input_path, app)
+        else:
+            print(f"Invalid path: {input_path}")
+            reset_cursor()
+            sys.exit(1)
 
         elapsed_time = time.time() - start_time
         print(f"Processing completed in {elapsed_time:.2f} seconds.")
@@ -207,21 +193,22 @@ def main():
         if not study_data:
             return
 
+        # Sort and prepare study data for clipboard
         sorted_study_data = sorted(study_data.items(), key=lambda x: (x[0][0], x[0][1]))
         output_text = "The below studies are available\r\n\r\n"
         for (study_date, study_description), paths in sorted_study_data:
             if study_description != "Unknown" and not study_description.startswith("Study for"):
                 output_text += f"{study_date} {study_description} \r\n"
 
+        # Copy to clipboard
         clipboard.copy(output_text)
         print("Studies copied")
 
         show_success_popup("Studies have been successfully copied to the clipboard.")
     finally:
-        reset_cursor()  # Reset the cursor back to default after processing
-        app.processEvents()  # Ensure the cursor restoration takes effect
+        reset_cursor()
+        app.processEvents()
 
-    # Exit after the success popup is acknowledged
     app.quit()
 
 if __name__ == "__main__":
