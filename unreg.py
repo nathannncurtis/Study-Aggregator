@@ -2,7 +2,7 @@ import winreg
 
 def remove_context_menu():
     try:
-        # Remove context menu for all files
+        # Remove context menu for files
         key_path = r'Software\Classes\*\shell\Study Aggregator'
         remove_registry_entry(key_path)
 
