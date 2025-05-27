@@ -202,7 +202,7 @@ def zip_needs_password(zip_path):
         return True
 
 # process a single zip file with support for nested zips
-def process_zip_file(zip_path, password=None, max_workers=None, progress_callback=None, nested_level=0, max_nested_level=10):
+def process_zip_file(zip_path, password=None, max_workers=None, progress_callback=None, nested_level=0, max_nested_level=5):
     found_studies = defaultdict(set)
     
     # Prevent excessive recursion
@@ -233,32 +233,13 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
         # Check if it's a large file and use a more efficient method
         file_size = os.path.getsize(zip_path)
         
-        if file_size > 100 * 1024 * 1024:  # if greater than 100MB
-            # For large files, we'll extract only .dcm files and files without extensions
-            # This is much faster than extracting everything
-            
-            if needs_password:
-                with pyzipper.AESZipFile(zip_path) as zf:
-                    # Only extract DICOM files to save time
-                    for file_info in zf.infolist():
-                        filename = file_info.filename
-                        if filename.endswith('.dcm') or filename.endswith('.zip') or '.' not in os.path.basename(filename):
-                            zf.extract(file_info, temp_dir, pwd=password)
-            else:
-                with zipfile.ZipFile(zip_path) as zf:
-                    # Only extract DICOM files to save time
-                    for file_info in zf.infolist():
-                        filename = file_info.filename
-                        if filename.endswith('.dcm') or filename.endswith('.zip') or '.' not in os.path.basename(filename):
-                            zf.extract(file_info, temp_dir)
+        # Extract all files - we'll filter during processing instead of extraction
+        if needs_password:
+            with pyzipper.AESZipFile(zip_path) as zf:
+                zf.extractall(temp_dir, pwd=password)
         else:
-            # For smaller files, just extract everything
-            if needs_password:
-                with pyzipper.AESZipFile(zip_path) as zf:
-                    zf.extractall(temp_dir, pwd=password)
-            else:
-                with zipfile.ZipFile(zip_path) as zf:
-                    zf.extractall(temp_dir)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(temp_dir)
     except (RuntimeError, zipfile.BadZipFile) as e:
         print(f"Error extracting zip: {e}")
         shutil.rmtree(temp_dir)
