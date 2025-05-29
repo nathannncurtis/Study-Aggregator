@@ -21,46 +21,86 @@ import traceback
 import subprocess
 import re
 
-# --- Logging Setup ---
+# --- Enhanced Logging Setup ---
 def setup_logging():
-    log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
-
-    for handler in logger.handlers[:]:
-        if isinstance(handler, logging.StreamHandler) and handler.stream in [sys.stdout, sys.stderr]:
-            logger.removeHandler(handler)
-
+    """Setup comprehensive logging to catch all errors"""
     try:
-        log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dicom_aggregator.log")
-        
-        has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in logger.handlers)
-        
-        if not has_file_handler:
-            file_handler = logging.FileHandler(log_file_path, mode='a')
-            file_handler.setFormatter(log_formatter)
-            logger.addHandler(file_handler)
-        else:
-            pass
+        log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+
+        # Clear existing handlers to avoid duplicates
+        for handler in logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler) and handler.stream in [sys.stdout, sys.stderr]:
+                logger.removeHandler(handler)
+
+        try:
+            log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dicom_aggregator.log")
             
+            has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in logger.handlers)
+            
+            if not has_file_handler:
+                file_handler = logging.FileHandler(log_file_path, mode='a')
+                file_handler.setFormatter(log_formatter)
+                logger.addHandler(file_handler)
+            else:
+                pass
+                
+        except Exception as e:
+            print(f"CRITICAL: Error setting up file logger: {e}", file=sys.stderr)
+
+        logging.info("=== DICOM Aggregator Session Started ===")
+        logging.info("Logging initialized. Output directed to dicom_aggregator.log")
+        return True
+        
     except Exception as e:
-        print(f"CRITICAL: Error setting up file logger: {e}", file=sys.stderr)
+        print(f"Critical: Failed to setup logging: {e}", file=sys.stderr)
+        return False
 
-    logging.info("Logging initialized. Output directed to dicom_aggregator.log")
+# Enhanced error handling function
+def handle_critical_error(error, context="Unknown"):
+    """Handle critical errors with user-friendly messages"""
+    error_msg = str(error)
+    logging.critical(f"Critical error in {context}: {error_msg}", exc_info=True)
+    
+    # Map common errors to user-friendly messages
+    if "No module named" in error_msg:
+        user_msg = "Missing required software component. Please reinstall the application or contact support."
+    elif "Permission denied" in error_msg or "Access is denied" in error_msg:
+        user_msg = "Permission denied accessing files or directories. Please run as administrator or check file permissions."
+    elif "Memory" in error_msg or "MemoryError" in error_msg:
+        user_msg = "Insufficient memory to process files. Try processing smaller batches or restart the application."
+    elif "Timeout" in error_msg or "timeout" in error_msg:
+        user_msg = "Operation timed out. Files may be too large or system resources are limited."
+    elif "corrupted" in error_msg.lower() or "invalid" in error_msg.lower():
+        user_msg = "Invalid or corrupted file detected. Please verify file integrity and try again."
+    else:
+        user_msg = f"An unexpected error occurred: {error_msg}. Please check the log file for details."
+    
+    return user_msg
 
-# --- End Logging Setup ---
+# --- End Enhanced Logging Setup ---
 
-user32 = ctypes.WinDLL('user32', use_last_error=True)
+# Initialize logging early
+setup_logging()
+
+try:
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+except Exception as e:
+    logging.warning(f"Could not load Windows user32 library: {e}")
+    user32 = None
 
 def set_busy_cursor():
     try:
-        user32.SetSystemCursor(user32.LoadCursorW(0, 32514), 32512)
+        if user32:
+            user32.SetSystemCursor(user32.LoadCursorW(0, 32514), 32512)
     except Exception as e:
         logging.warning(f"Could not set busy cursor: {e}")
 
 def reset_cursor():
     try:
-        user32.SystemParametersInfoW(87, 0, None, 0)
+        if user32:
+            user32.SystemParametersInfoW(87, 0, None, 0)
     except Exception as e:
         logging.warning(f"Could not reset cursor: {e}")
 
@@ -71,29 +111,34 @@ try:
     else:
         application_path = os.path.dirname(os.path.abspath(__file__))
     icon_path = os.path.join(application_path, 'agg.ico')
-except Exception:
+except Exception as e:
+    logging.warning(f"Could not determine application path: {e}")
     icon_path = 'agg.ico'
 
 # 7zip detection and path finding
 def find_7zip():
     """Find 7zip executable on the system"""
-    possible_paths = [
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
-        "7z",  # In PATH
-        "7za", # Standalone version
-    ]
-    
-    for path in possible_paths:
-        try:
-            result = subprocess.run([path], capture_output=True, timeout=5)
-            logging.info(f"Found 7zip at: {path}")
-            return path
-        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, OSError):
-            continue
-    
-    logging.info("7zip not found on system, will use pyzipper fallback")
-    return None
+    try:
+        possible_paths = [
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+            "7z",  # In PATH
+            "7za", # Standalone version
+        ]
+        
+        for path in possible_paths:
+            try:
+                result = subprocess.run([path], capture_output=True, timeout=5)
+                logging.info(f"Found 7zip at: {path}")
+                return path
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, OSError):
+                continue
+        
+        logging.info("7zip not found on system, will use pyzipper fallback")
+        return None
+    except Exception as e:
+        logging.warning(f"Error during 7zip detection: {e}")
+        return None
 
 # Global 7zip path
 SEVEN_ZIP_PATH = find_7zip()
@@ -101,30 +146,36 @@ SEVEN_ZIP_PATH = find_7zip()
 class ProgressDialog(QWidget):
     def __init__(self, title="Processing"):
         super().__init__()
-        self.setWindowTitle(title)
-        self.setWindowFlag(Qt.WindowStaysOnTopHint)
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-        else:
-            logging.warning(f"Icon file not found at {icon_path}, not setting window icon for ProgressDialog.")
-        
-        layout = QVBoxLayout()
-        
-        self.label = QLabel("Processing files...")
-        layout.addWidget(self.label)
-        
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        layout.addWidget(self.progress_bar)
-        
-        self.setLayout(layout)
-        self.resize(400, 100)
+        try:
+            self.setWindowTitle(title)
+            self.setWindowFlag(Qt.WindowStaysOnTopHint)
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+            else:
+                logging.warning(f"Icon file not found at {icon_path}, not setting window icon for ProgressDialog.")
+            
+            layout = QVBoxLayout()
+            
+            self.label = QLabel("Processing files...")
+            layout.addWidget(self.label)
+            
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setMinimum(0)
+            self.progress_bar.setMaximum(100)
+            layout.addWidget(self.progress_bar)
+            
+            self.setLayout(layout)
+            self.resize(400, 100)
+        except Exception as e:
+            logging.error(f"Error initializing ProgressDialog: {e}", exc_info=True)
         
     def update_progress(self, value, text=None):
-        self.progress_bar.setValue(value)
-        if text:
-            self.label.setText(text)
+        try:
+            self.progress_bar.setValue(value)
+            if text:
+                self.label.setText(text)
+        except Exception as e:
+            logging.error(f"Error updating progress: {e}")
             
     def closeEvent(self, event):
         event.ignore()
@@ -135,7 +186,7 @@ def show_error_popup(message):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Critical)
         msg.setText(message)
-        msg.setWindowTitle("Error")
+        msg.setWindowTitle("DICOM Aggregator - Error")
         if os.path.exists(icon_path):
             msg.setWindowIcon(QIcon(icon_path))
         else:
@@ -144,6 +195,8 @@ def show_error_popup(message):
         msg.exec_()
     except Exception as e:
         logging.error(f"Failed to show error popup: {e}", exc_info=True)
+        # Fallback to console output
+        print(f"ERROR: {message}", file=sys.stderr)
 
 def show_success_popup(message):
     logging.info(f"Displaying success popup: {message}")
@@ -151,7 +204,7 @@ def show_success_popup(message):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
         msg.setText(message)
-        msg.setWindowTitle("Success")
+        msg.setWindowTitle("DICOM Aggregator - Success")
         if os.path.exists(icon_path):
             msg.setWindowIcon(QIcon(icon_path))
         else:
@@ -160,6 +213,7 @@ def show_success_popup(message):
         msg.exec_()
     except Exception as e:
         logging.error(f"Failed to show success popup: {e}", exc_info=True)
+        print(f"SUCCESS: {message}")
 
 def is_valid_dicom_file(file_path):
     try:
@@ -168,7 +222,7 @@ def is_valid_dicom_file(file_path):
             
         # Skip PDF files and other common non-DICOM file types
         file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext in ['.pdf', '.txt', '.exe', '.bat', '.inf', '.chm']:
+        if file_ext in ['.pdf', '.txt', '.exe', '.bat', '.inf', '.chm', '.log', '.xml', '.html']:
             logging.debug(f"Skipping non-DICOM file type: {file_path}")
             return False
             
@@ -198,28 +252,36 @@ def is_valid_dicom_file(file_path):
 
 def normalize_name(name):
     """Normalize patient name for matching"""
-    if not name or name == "Unknown":
+    try:
+        if not name or name == "Unknown":
+            return None
+        
+        # Remove common separators and extra spaces
+        name = str(name).replace("^", " ").replace(",", " ").replace("_", " ")
+        name = " ".join(name.split())  # Remove extra whitespace
+        
+        # Split into parts and sort to handle "LAST FIRST" vs "FIRST LAST"
+        parts = [part.strip().upper() for part in name.split() if part.strip()]
+        if len(parts) >= 2:
+            return tuple(sorted(parts))  # Return sorted tuple for matching
+        return tuple(parts) if parts else None
+    except Exception as e:
+        logging.warning(f"Error normalizing name '{name}': {e}")
         return None
-    
-    # Remove common separators and extra spaces
-    name = str(name).replace("^", " ").replace(",", " ").replace("_", " ")
-    name = " ".join(name.split())  # Remove extra whitespace
-    
-    # Split into parts and sort to handle "LAST FIRST" vs "FIRST LAST"
-    parts = [part.strip().upper() for part in name.split() if part.strip()]
-    if len(parts) >= 2:
-        return tuple(sorted(parts))  # Return sorted tuple for matching
-    return tuple(parts) if parts else None
 
 def names_match(name1, name2):
     """Check if two names likely refer to the same person"""
-    norm1 = normalize_name(name1)
-    norm2 = normalize_name(name2)
-    
-    if norm1 is None or norm2 is None:
+    try:
+        norm1 = normalize_name(name1)
+        norm2 = normalize_name(name2)
+        
+        if norm1 is None or norm2 is None:
+            return False
+        
+        return norm1 == norm2
+    except Exception as e:
+        logging.warning(f"Error matching names '{name1}' and '{name2}': {e}")
         return False
-    
-    return norm1 == norm2
 
 @lru_cache(maxsize=2000)
 def extract_study_info(dicom_file):
@@ -294,19 +356,30 @@ def extract_study_info(dicom_file):
         
         return result
 
+    except pydicom.errors.InvalidDicomError as e:
+        logging.warning(f"Invalid DICOM file {dicom_file}: {e}")
+        return None
     except Exception as e:
-        logging.warning(f"Failed to extract study info from {dicom_file}: {e}", exc_info=True)
+        error_type = type(e).__name__
+        if "encryption" in str(e).lower() or "proprietary" in str(e).lower():
+            logging.warning(f"Proprietary/encrypted DICOM file {dicom_file}: {e}")
+        else:
+            logging.warning(f"Failed to extract study info from {dicom_file} ({error_type}): {e}")
         return None
 
 def get_password_from_gui(parent_widget, description_text):
-    password, ok = QInputDialog.getText(parent_widget, 'Password Required', 
-                                        f'Enter password for {description_text}:', 
-                                        QLineEdit.Password)
-    if ok and password:
-        return password.encode('utf-8')
-    elif ok and not password:
-        return b'' 
-    return None
+    try:
+        password, ok = QInputDialog.getText(parent_widget, 'Password Required', 
+                                            f'Enter password for {description_text}:', 
+                                            QLineEdit.Password)
+        if ok and password:
+            return password.encode('utf-8')
+        elif ok and not password:
+            return b'' 
+        return None
+    except Exception as e:
+        logging.error(f"Error getting password from GUI: {e}")
+        return None
 
 def process_dicom_file(file_path):
     try:
@@ -329,6 +402,9 @@ def detect_zip_encryption_type(zip_path):
                             return "aes"
                     return "traditional"
             return "none"
+    except zipfile.BadZipFile as e:
+        logging.error(f"Bad zip file {zip_path}: {e}")
+        return "corrupted"
     except Exception as e:
         logging.error(f"Error detecting encryption type for {zip_path}: {e}")
         return "unknown"
@@ -386,6 +462,12 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
     
     extraction_successful = False
     encryption_type = detect_zip_encryption_type(zip_path)
+    
+    if encryption_type == "corrupted":
+        if progress_callback:
+            progress_callback(100, f"Skipping corrupted zip: {os.path.basename(zip_path)}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return found_studies
     
     try:
         if encryption_type == "none":
@@ -482,6 +564,8 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
                 dicom_files.append(file_path)
     
     logging.info(f"Found {len(dicom_files)} potential DICOM files in extracted {zip_path}")
+    valid_dicom_count = 0
+    
     if dicom_files:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             batch_size = min(100, len(dicom_files)) if len(dicom_files) > 0 else 1
@@ -503,8 +587,9 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
                         if study_info:
                             study_info['source_path'] = zip_path
                             found_studies.append(study_info)
+                            valid_dicom_count += 1
     
-    logging.info(f"Found {len([s for s in found_studies if s])} valid studies in {zip_path}")
+    logging.info(f"Found {valid_dicom_count} valid DICOM studies in {zip_path}")
     if progress_callback:
         progress_callback(100, f"{'  ' * nested_level}Completed processing {os.path.basename(zip_path)}")
     
@@ -530,16 +615,20 @@ def find_zip_files(directory):
 
 def is_patient_all_unknown(patient_data):
     """Check if a patient has all unknown/empty identifying information"""
-    patient_id = patient_data.get('patient_id')
-    patient_name = patient_data.get('patient_name', 'Unknown')
-    patient_dob = patient_data.get('patient_dob', 'Unknown')
-    
-    # Consider empty strings as unknown too
-    id_unknown = not patient_id or patient_id.strip() == ''
-    name_unknown = not patient_name or patient_name.strip() == '' or patient_name.strip() == 'Unknown'
-    dob_unknown = not patient_dob or patient_dob.strip() == '' or patient_dob.strip() == 'Unknown'
-    
-    return id_unknown and name_unknown and dob_unknown
+    try:
+        patient_id = patient_data.get('patient_id')
+        patient_name = patient_data.get('patient_name', 'Unknown')
+        patient_dob = patient_data.get('patient_dob', 'Unknown')
+        
+        # Consider empty strings as unknown too
+        id_unknown = not patient_id or patient_id.strip() == ''
+        name_unknown = not patient_name or patient_name.strip() == '' or patient_name.strip() == 'Unknown'
+        dob_unknown = not patient_dob or patient_dob.strip() == '' or patient_dob.strip() == 'Unknown'
+        
+        return id_unknown and name_unknown and dob_unknown
+    except Exception as e:
+        logging.warning(f"Error checking if patient is all unknown: {e}")
+        return False
 
 def merge_patients(studies_list):
     """Merge studies from the same patient based on ID and name matching, group by study and series"""
@@ -547,78 +636,87 @@ def merge_patients(studies_list):
     
     logging.info(f"Starting merge_patients with {len(studies_list)} studies")
     
+    if not studies_list:
+        logging.warning("No studies provided to merge_patients")
+        return patients
+    
     for i, study in enumerate(studies_list):
         if not study or not isinstance(study, dict):
             logging.warning(f"Invalid study data at index {i}: {study}")
             continue
             
-        patient_id = study.get('patient_id')
-        patient_name = study.get('patient_name', 'Unknown')
-        patient_dob = study.get('patient_dob', 'Unknown')
-        study_desc = study.get('study_description', 'Unknown')
-        
-        # Log problematic entries with source file information
-        if patient_name == 'Unknown' or study_desc in ['Study', 'Unknown']:
-            source_file = study.get('source_path', 'Unknown source')
-            logging.warning(f"Study {i} has missing data from {source_file} - Name: '{patient_name}', "
-                          f"StudyDesc: '{study_desc}', ID: '{patient_id}', DOB: '{patient_dob}'")
-        
-        # Find matching patient
-        matched_key = None
-        
-        # First, try to match by Patient ID
-        if patient_id:
-            for key in patients.keys():
-                if patients[key].get('patient_id') == patient_id:
-                    matched_key = key
-                    break
-        
-        # If no ID match, try name matching
-        if not matched_key:
-            for key in patients.keys():
-                if names_match(patient_name, patients[key].get('patient_name')):
-                    # Check for DOB conflicts (both real but different)
-                    existing_dob = patients[key].get('patient_dob', 'Unknown')
-                    if (patient_dob != 'Unknown' and existing_dob != 'Unknown' and 
-                        patient_dob != existing_dob):
-                        # DOB conflict - don't merge, will create separate entry
-                        continue
-                    matched_key = key
-                    break
-        
-        if matched_key:
-            # Merge with existing patient
-            existing = patients[matched_key]
+        try:
+            patient_id = study.get('patient_id')
+            patient_name = study.get('patient_name', 'Unknown')
+            patient_dob = study.get('patient_dob', 'Unknown')
+            study_desc = study.get('study_description', 'Unknown')
             
-            # Update DOB if current study has one and existing doesn't
-            if patient_dob != 'Unknown' and existing.get('patient_dob') == 'Unknown':
-                existing['patient_dob'] = patient_dob
-        else:
-            # Create new patient entry
-            patient_key = f"{patient_name}_{patient_dob}_{patient_id or 'NO_ID'}"
-            patients[patient_key] = {
-                'patient_id': patient_id,
-                'patient_name': patient_name,
-                'patient_dob': patient_dob,
-                'studies': {}
-            }
-            matched_key = patient_key
-            logging.debug(f"Created new patient entry: {patient_key}")
-        
-        # Group by study first
-        patient_data = patients[matched_key]
-        study_uid = study.get('study_instance_uid') or f"{study.get('study_date', 'Unknown')}_{study.get('study_description', 'Unknown')}"
-        
-        if study_uid not in patient_data['studies']:
-            patient_data['studies'][study_uid] = {
-                'study_date': study.get('study_date', 'Unknown'),
-                'study_description': study.get('study_description', 'Unknown'),
-                'all_series': set()  # Track all series in this study regardless of modality
-            }
-        
-        # Track all series within the study (regardless of modality)
-        series_uid = study.get('series_instance_uid') or f"{study.get('series_number', 'Unknown')}_{study.get('series_description', 'Unknown')}"
-        patient_data['studies'][study_uid]['all_series'].add(series_uid)
+            # Log problematic entries with source file information
+            if patient_name == 'Unknown' or study_desc in ['Study', 'Unknown']:
+                source_file = study.get('source_path', 'Unknown source')
+                logging.warning(f"Study {i} has missing data from {source_file} - Name: '{patient_name}', "
+                              f"StudyDesc: '{study_desc}', ID: '{patient_id}', DOB: '{patient_dob}'")
+            
+            # Find matching patient
+            matched_key = None
+            
+            # First, try to match by Patient ID
+            if patient_id:
+                for key in patients.keys():
+                    if patients[key].get('patient_id') == patient_id:
+                        matched_key = key
+                        break
+            
+            # If no ID match, try name matching
+            if not matched_key:
+                for key in patients.keys():
+                    if names_match(patient_name, patients[key].get('patient_name')):
+                        # Check for DOB conflicts (both real but different)
+                        existing_dob = patients[key].get('patient_dob', 'Unknown')
+                        if (patient_dob != 'Unknown' and existing_dob != 'Unknown' and 
+                            patient_dob != existing_dob):
+                            # DOB conflict - don't merge, will create separate entry
+                            continue
+                        matched_key = key
+                        break
+            
+            if matched_key:
+                # Merge with existing patient
+                existing = patients[matched_key]
+                
+                # Update DOB if current study has one and existing doesn't
+                if patient_dob != 'Unknown' and existing.get('patient_dob') == 'Unknown':
+                    existing['patient_dob'] = patient_dob
+            else:
+                # Create new patient entry
+                patient_key = f"{patient_name}_{patient_dob}_{patient_id or 'NO_ID'}"
+                patients[patient_key] = {
+                    'patient_id': patient_id,
+                    'patient_name': patient_name,
+                    'patient_dob': patient_dob,
+                    'studies': {}
+                }
+                matched_key = patient_key
+                logging.debug(f"Created new patient entry: {patient_key}")
+            
+            # Group by study first
+            patient_data = patients[matched_key]
+            study_uid = study.get('study_instance_uid') or f"{study.get('study_date', 'Unknown')}_{study.get('study_description', 'Unknown')}"
+            
+            if study_uid not in patient_data['studies']:
+                patient_data['studies'][study_uid] = {
+                    'study_date': study.get('study_date', 'Unknown'),
+                    'study_description': study.get('study_description', 'Unknown'),
+                    'all_series': set()  # Track all series in this study regardless of modality
+                }
+            
+            # Track all series within the study (regardless of modality)
+            series_uid = study.get('series_instance_uid') or f"{study.get('series_number', 'Unknown')}_{study.get('series_description', 'Unknown')}"
+            patient_data['studies'][study_uid]['all_series'].add(series_uid)
+            
+        except Exception as e:
+            logging.error(f"Error processing study {i}: {e}", exc_info=True)
+            continue
     
     # Filter out patients with all unknown identifying information
     patients_before_filter = len(patients)
@@ -658,6 +756,11 @@ class ProcessingThread(QThread):
                 encryption_type = detect_zip_encryption_type(self.input_path)
                 thread_password = None
                 
+                if encryption_type == "corrupted":
+                    self.error_signal.emit(f"The ZIP file appears to be corrupted or damaged: {os.path.basename(self.input_path)}. Please verify the file integrity.")
+                    reset_cursor()
+                    return
+                
                 if encryption_type != "none":
                     self.progress_updated.emit(-1, "Password")
                     password_attr_set = False
@@ -673,7 +776,7 @@ class ProcessingThread(QThread):
                             time.sleep(0.1)
                     if not password_attr_set:
                         logging.error("Timeout or failure waiting for password for single zip.")
-                        self.error_signal.emit("Failed to get password for encrypted ZIP.")
+                        self.error_signal.emit("Password input timed out. Please try again.")
                         reset_cursor()
                         return
                 
@@ -684,17 +787,24 @@ class ProcessingThread(QThread):
                     all_studies.extend(study_data)
                 except Exception as e:
                     if "WRONG_PASSWORD" in str(e):
-                        self.error_signal.emit("Wrong password provided for encrypted ZIP file.")
+                        self.error_signal.emit("Incorrect password provided for the encrypted ZIP file. Please check your password and try again.")
                     else:
-                        self.error_signal.emit(f"Failed to extract ZIP file: {str(e)}")
+                        error_msg = handle_critical_error(e, "ZIP file processing")
+                        self.error_signal.emit(error_msg)
                     reset_cursor()
                     return
                     
             elif os.path.isdir(self.input_path):
                 self.progress_updated.emit(0, f"Processing directory: {os.path.basename(self.input_path)}")
-                all_studies = self.extract_directory_info()
+                try:
+                    all_studies = self.extract_directory_info()
+                except Exception as e:
+                    error_msg = handle_critical_error(e, "directory processing")
+                    self.error_signal.emit(error_msg)
+                    reset_cursor()
+                    return
             else:
-                err_msg = f"Invalid path or file type: {self.input_path}"
+                err_msg = f"Invalid input: '{self.input_path}' is not a valid directory or ZIP file."
                 logging.error(err_msg)
                 self.error_signal.emit(err_msg)
                 reset_cursor()
@@ -702,24 +812,54 @@ class ProcessingThread(QThread):
             
             try:
                 logging.debug(f"Processing complete. Found {len(all_studies)} total studies.")
+                
+                if not all_studies:
+                    self.error_signal.emit("No DICOM studies found in the specified location. Please verify that the source contains valid DICOM files and try again.")
+                    reset_cursor()
+                    return
+                
                 # Filter out any None entries
                 valid_studies = [s for s in all_studies if s is not None]
+                
+                if not valid_studies:
+                    self.error_signal.emit("No valid DICOM studies could be processed. The files may be corrupted, encrypted with proprietary encryption, or not contain standard DICOM headers.")
+                    reset_cursor()
+                    return
+                
                 merged_patients = merge_patients(valid_studies)
+                
+                if not merged_patients:
+                    self.error_signal.emit("Unable to aggregate DICOM studies: All extracted data contains insufficient patient identification information. Please manually inspect the source files to verify they contain valid DICOM headers with patient details.")
+                    reset_cursor()
+                    return
+                
                 logging.debug(f"Merged into {len(merged_patients)} unique patients.")
                 self.finished_signal.emit(merged_patients)
                 logging.debug("Finished signal emitted successfully.")
+                
             except Exception as emit_err:
-                logging.error(f"Failed to emit finished signal: {emit_err}", exc_info=True)
+                error_msg = handle_critical_error(emit_err, "data processing")
+                logging.error(f"Failed to process study data: {emit_err}", exc_info=True)
+                self.error_signal.emit(error_msg)
+                reset_cursor()
+                
         except Exception as e:
-            logging.error(f"Error in ProcessingThread: {e}", exc_info=True)
-            self.error_signal.emit(f"An unexpected error occurred: {str(e)}")
+            error_msg = handle_critical_error(e, "processing thread")
+            logging.error(f"Critical error in ProcessingThread: {e}", exc_info=True)
+            self.error_signal.emit(error_msg)
         finally:
             reset_cursor()
             
     def extract_directory_info(self):
         all_studies = []
         self.progress_updated.emit(0, "Scanning for zip files...")
-        zip_files = find_zip_files(self.input_path)
+        
+        try:
+            zip_files = find_zip_files(self.input_path)
+        except Exception as e:
+            logging.error(f"Error scanning for ZIP files: {e}")
+            zip_files = []
+        
         thread_shared_password = None
         
         # Process ZIP files if found
@@ -731,7 +871,7 @@ class ProcessingThread(QThread):
             for i, zip_path_check in enumerate(zip_files):
                 try:
                     encryption_type = detect_zip_encryption_type(zip_path_check)
-                    is_needed = encryption_type != "none"
+                    is_needed = encryption_type not in ["none", "corrupted"]
                     password_needed_flags[zip_path_check] = is_needed
                     if is_needed: any_zip_needs_password = True
                     self.progress_updated.emit(5 + int((i / len(zip_files)) * 10), f"Checking zip file {i+1}/{len(zip_files)}...")
@@ -786,26 +926,29 @@ class ProcessingThread(QThread):
         self.progress_updated.emit(progress_start_dicom + 5, "Analyzing file types for loose DICOMs...")
         file_scan_count, total_files_to_scan = 0, 0
         
-        # Count total files first
-        for root, _, files in os.walk(self.input_path):
-            for file_name in files:
-                if not file_name.lower().endswith('.zip'):  # Skip ZIP files we already processed
-                    total_files_to_scan += 1
-        
-        # Find potential DICOM files
-        for root, _, files in os.walk(self.input_path):
-            for file_name in files:
-                if file_name.lower().endswith('.zip'):  # Skip ZIP files
-                    continue
+        try:
+            # Count total files first
+            for root, _, files in os.walk(self.input_path):
+                for file_name in files:
+                    if not file_name.lower().endswith('.zip'):  # Skip ZIP files we already processed
+                        total_files_to_scan += 1
+            
+            # Find potential DICOM files
+            for root, _, files in os.walk(self.input_path):
+                for file_name in files:
+                    if file_name.lower().endswith('.zip'):  # Skip ZIP files
+                        continue
+                        
+                    file_scan_count += 1
+                    if file_scan_count % 200 == 0 and total_files_to_scan > 0:
+                        progress_val = progress_start_dicom + 5 + int((file_scan_count / total_files_to_scan) * 15)
+                        self.progress_updated.emit(progress_val, f"Analyzing file types: {file_scan_count}/{total_files_to_scan}")
                     
-                file_scan_count += 1
-                if file_scan_count % 200 == 0 and total_files_to_scan > 0:
-                    progress_val = progress_start_dicom + 5 + int((file_scan_count / total_files_to_scan) * 15)
-                    self.progress_updated.emit(progress_val, f"Analyzing file types: {file_scan_count}/{total_files_to_scan}")
-                
-                file_path, ext = os.path.join(root, file_name), os.path.splitext(file_name)[1].lower()
-                if ext in ('.dcm', '.ima', '.dicom', '') or not ext:
-                    all_potential_dicom_files.append(file_path)
+                    file_path, ext = os.path.join(root, file_name), os.path.splitext(file_name)[1].lower()
+                    if ext in ('.dcm', '.ima', '.dicom', '') or not ext:
+                        all_potential_dicom_files.append(file_path)
+        except Exception as e:
+            logging.error(f"Error scanning for loose DICOM files: {e}")
         
         logging.info(f"Found {len(all_potential_dicom_files)} potential loose DICOM files")
         
@@ -844,180 +987,225 @@ class ProcessingThread(QThread):
         return all_studies
 
 def main_app_logic():
-    cpu_cores = os.cpu_count() if os.cpu_count() is not None else 1
-    max_workers = min(cpu_cores, 8) 
-    logging.info(f"Using up to {max_workers} worker threads.")
-    logging.info(f"7zip available: {'Yes' if SEVEN_ZIP_PATH else 'No'}")
-    
-    app = QApplication.instance() or QApplication(sys.argv)
-    
-    if len(sys.argv) < 2:
-        logging.error("Usage: script.py <path_to_directory_or_zip_file>")
-        print("Usage: script.py <path_to_directory_or_zip_file>", file=sys.stderr)
-        return 1
+    try:
+        cpu_cores = os.cpu_count() if os.cpu_count() is not None else 1
+        max_workers = min(cpu_cores, 8) 
+        logging.info(f"Using up to {max_workers} worker threads.")
+        logging.info(f"7zip available: {'Yes' if SEVEN_ZIP_PATH else 'No'}")
         
-    input_path = sys.argv[1]
-    if not os.path.exists(input_path):
-        logging.error(f"Input path does not exist: {input_path}")
-        print(f"Error: Input path does not exist: {input_path}", file=sys.stderr)
-        return 1
+        app = QApplication.instance() or QApplication(sys.argv)
         
-    progress_dialog = ProgressDialog("Processing DICOM Files")
-    progress_dialog.show()
-    
-    processing_thread = ProcessingThread(input_path, max_workers)
-    
-    def update_progress_slot(value, text):
-        if value == -1 and text == "Password":
-            progress_dialog.hide()
-            try:
-                if os.path.isfile(processing_thread.input_path) and processing_thread.input_path.lower().endswith('.zip'):
-                    logging.info(f"Requesting password for single zip: {processing_thread.input_path}")
-                    password_bytes = get_password_from_gui(progress_dialog, f"encrypted ZIP: {os.path.basename(processing_thread.input_path)}")
-                    processing_thread.password_from_gui = password_bytes
-                else:
-                    logging.info("Requesting shared password for directory processing.")
-                    password_bytes = get_password_from_gui(progress_dialog, "any password-protected ZIP files in the directory")
-                    processing_thread.shared_password_from_gui = password_bytes
-            finally:
-                progress_dialog.show()
-        else:
-            progress_dialog.update_progress(value, text)
-    
-    processing_thread.progress_updated.connect(update_progress_slot)
-    
-    def on_finished_slot(merged_patients):
-        logging.debug("on_finished_slot() called.")
-        try:
-            progress_dialog.update_progress(100, "Processing complete. Formatting results...")
-            logging.debug(f"Received merged_patients with {len(merged_patients)} entries")
-            logging.debug(f"Merged patients type: {type(merged_patients)}")
-
-            if not merged_patients:
-                logging.warning("No patient data found after processing and filtering.")
-                show_error_popup("Unable to aggregate DICOM studies: All extracted data contains insufficient patient identification information. Please manually inspect the source files to verify they contain valid DICOM headers with patient details.")
-                progress_dialog.close()
-                app.quit()
-                return
-
-            logging.debug("Patient data found. Beginning formatting.")
-
-            # Sort patients by ID (treat all as strings for consistency), then by name
-            def sort_patients(patient_data):
-                pid = patient_data.get('patient_id') or 'ZZZZ'
-                name = patient_data.get('patient_name', 'Unknown')
-                
-                # Convert all patient IDs to strings and pad numeric ones for proper sorting
-                try:
-                    if pid and pid.isdigit():
-                        # Pad numeric IDs with leading zeros for proper string sorting
-                        pid_val = pid.zfill(10)  # Pad to 10 digits
-                    else:
-                        pid_val = str(pid) if pid else 'ZZZZ'
-                except:
-                    pid_val = str(pid) if pid else 'ZZZZ'
-                    
-                return (pid_val, name.lower())
-
-            sorted_patients = sorted(merged_patients.values(), key=sort_patients)
+        if len(sys.argv) < 2:
+            error_msg = "No input specified. Please drag and drop a directory or ZIP file onto this application, or run it from command line with a path argument."
+            logging.error("Usage: script.py <path_to_directory_or_zip_file>")
+            show_error_popup(error_msg)
+            return 1
             
-            lines = []
-            for patient in sorted_patients:
-                pid = patient.get('patient_id', '')
-                name = patient.get('patient_name', 'Unknown')
-                dob = patient.get('patient_dob', 'Unknown')
-                
-                # Format patient header
-                if pid:
-                    display_name = f"NAME: {name} DOB: {dob}, ID: {pid}"
-                else:
-                    display_name = f"NAME: {name} DOB: {dob}, ID: Unknown"
-
-                lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
-
-                # Get studies dictionary
-                studies_dict = patient.get('studies', {})
-                logging.debug(f"Studies type: {type(studies_dict)}, count: {len(studies_dict)}")
-                
-                if isinstance(studies_dict, dict) and studies_dict:
-                    # Sort studies by date, then description
-                    sorted_studies = sorted(studies_dict.values(), 
-                                        key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
-                    
-                    for study in sorted_studies:
-                        study_date = study.get('study_date', 'Unknown')
-                        study_desc = study.get('study_description', 'Unknown')
-                        
-                        # Get all series in this study (regardless of modality)
-                        all_series = study.get('all_series', set())
-                        series_count = len(all_series)
-                        
-                        if series_count > 0:
-                            # Format the line as: "DATE STUDY_DESCRIPTION (X series)"
-                            line = f"{study_date} {study_desc} ({series_count} series)\r\n"
-                            lines.append(line)
+        input_path = sys.argv[1]
+        if not os.path.exists(input_path):
+            error_msg = f"The specified path does not exist: '{input_path}'. Please verify the path and try again."
+            logging.error(f"Input path does not exist: {input_path}")
+            show_error_popup(error_msg)
+            return 1
+            
+        progress_dialog = ProgressDialog("Processing DICOM Files")
+        progress_dialog.show()
+        
+        processing_thread = ProcessingThread(input_path, max_workers)
+        
+        def update_progress_slot(value, text):
+            try:
+                if value == -1 and text == "Password":
+                    progress_dialog.hide()
+                    try:
+                        if os.path.isfile(processing_thread.input_path) and processing_thread.input_path.lower().endswith('.zip'):
+                            logging.info(f"Requesting password for single zip: {processing_thread.input_path}")
+                            password_bytes = get_password_from_gui(progress_dialog, f"encrypted ZIP: {os.path.basename(processing_thread.input_path)}")
+                            processing_thread.password_from_gui = password_bytes
                         else:
-                            # Fallback if no series data
-                            lines.append(f"{study_date} {study_desc}\r\n")
-
-                lines.append("\r\n" + "="*50 + "\r\n\r\n")
-
-            if not lines:
-                show_error_popup("Unable to aggregate DICOM studies: No valid patient data could be formatted for output. Please manually inspect the source files.")
-                progress_dialog.close()
-                app.quit()
-                return
-
-            # Copy to clipboard
-            output_text = "".join(lines)
-            logging.debug(f"Final output preview: {output_text[:500]}...")
-            
+                            logging.info("Requesting shared password for directory processing.")
+                            password_bytes = get_password_from_gui(progress_dialog, "any password-protected ZIP files in the directory")
+                            processing_thread.shared_password_from_gui = password_bytes
+                    finally:
+                        progress_dialog.show()
+                else:
+                    progress_dialog.update_progress(value, text)
+            except Exception as e:
+                logging.error(f"Error updating progress: {e}")
+        
+        processing_thread.progress_updated.connect(update_progress_slot)
+        
+        def on_finished_slot(merged_patients):
+            logging.debug("on_finished_slot() called.")
             try:
-                clipboard.copy(output_text)
-                progress_dialog.close()
-                show_success_popup("Studies have been successfully copied to the clipboard")
-                app.quit()
-            except Exception as clipboard_error:
-                progress_dialog.close()
-                show_error_popup(f"Failed to copy results to clipboard: {str(clipboard_error)}")
-                app.quit()
-                
-        except Exception as e_format:
-            logging.error(f"Error in on_finished_slot: {e_format}", exc_info=True)
-            progress_dialog.close()
-            show_error_popup(f"Error formatting results: {str(e_format)}")
-            app.quit()
+                progress_dialog.update_progress(100, "Processing complete. Formatting results...")
+                logging.debug(f"Received merged_patients with {len(merged_patients)} entries")
+                logging.debug(f"Merged patients type: {type(merged_patients)}")
 
-    def on_error_slot(error_message):
-        logging.error(f"Processing error signal received: {error_message}")
-        progress_dialog.close()
-        show_error_popup(error_message)
-        app.quit()
-    
-    processing_thread.finished_signal.connect(on_finished_slot)
-    processing_thread.error_signal.connect(on_error_slot)
-    
-    logging.info(f"Starting processing thread for input: {input_path}")
-    processing_thread.start()
-    return app.exec_()
+                if not merged_patients:
+                    logging.warning("No patient data found after processing and filtering.")
+                    show_error_popup("Unable to aggregate DICOM studies: All extracted data contains insufficient patient identification information. Please manually inspect the source files to verify they contain valid DICOM headers with patient details.")
+                    progress_dialog.close()
+                    app.quit()
+                    return
+
+                logging.debug("Patient data found. Beginning formatting.")
+
+                # Sort patients by ID (treat all as strings for consistency), then by name
+                def sort_patients(patient_data):
+                    try:
+                        pid = patient_data.get('patient_id') or 'ZZZZ'
+                        name = patient_data.get('patient_name', 'Unknown')
+                        
+                        # Convert all patient IDs to strings and pad numeric ones for proper sorting
+                        try:
+                            if pid and pid.isdigit():
+                                # Pad numeric IDs with leading zeros for proper string sorting
+                                pid_val = pid.zfill(10)  # Pad to 10 digits
+                            else:
+                                pid_val = str(pid) if pid else 'ZZZZ'
+                        except:
+                            pid_val = str(pid) if pid else 'ZZZZ'
+                            
+                        return (pid_val, name.lower())
+                    except Exception as e:
+                        logging.warning(f"Error sorting patient data: {e}")
+                        return ('ZZZZ', 'unknown')
+
+                sorted_patients = sorted(merged_patients.values(), key=sort_patients)
+                
+                lines = []
+                for patient in sorted_patients:
+                    try:
+                        pid = patient.get('patient_id', '')
+                        name = patient.get('patient_name', 'Unknown')
+                        dob = patient.get('patient_dob', 'Unknown')
+                        
+                        # Format patient header
+                        if pid:
+                            display_name = f"NAME: {name} DOB: {dob}, ID: {pid}"
+                        else:
+                            display_name = f"NAME: {name} DOB: {dob}, ID: Unknown"
+
+                        lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
+
+                        # Get studies dictionary
+                        studies_dict = patient.get('studies', {})
+                        logging.debug(f"Studies type: {type(studies_dict)}, count: {len(studies_dict)}")
+                        
+                        if isinstance(studies_dict, dict) and studies_dict:
+                            # Sort studies by date, then description
+                            sorted_studies = sorted(studies_dict.values(), 
+                                                key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
+                            
+                            for study in sorted_studies:
+                                study_date = study.get('study_date', 'Unknown')
+                                study_desc = study.get('study_description', 'Unknown')
+                                
+                                # Get all series in this study (regardless of modality)
+                                all_series = study.get('all_series', set())
+                                series_count = len(all_series)
+                                
+                                if series_count > 0:
+                                    # Format the line as: "DATE STUDY_DESCRIPTION (X series)"
+                                    line = f"{study_date} {study_desc} ({series_count} series)\r\n"
+                                    lines.append(line)
+                                else:
+                                    # Fallback if no series data
+                                    lines.append(f"{study_date} {study_desc}\r\n")
+
+                        lines.append("\r\n" + "="*50 + "\r\n\r\n")
+                    except Exception as e:
+                        logging.error(f"Error formatting patient data: {e}")
+                        continue
+
+                if not lines:
+                    show_error_popup("Unable to aggregate DICOM studies: No valid patient data could be formatted for output. Please manually inspect the source files.")
+                    progress_dialog.close()
+                    app.quit()
+                    return
+
+                # Copy to clipboard
+                output_text = "".join(lines)
+                logging.debug(f"Final output preview: {output_text[:500]}...")
+                
+                try:
+                    clipboard.copy(output_text)
+                    progress_dialog.close()
+                    show_success_popup("DICOM study information has been successfully copied to your clipboard and is ready to paste.")
+                    app.quit()
+                except Exception as clipboard_error:
+                    progress_dialog.close()
+                    error_msg = handle_critical_error(clipboard_error, "clipboard operation")
+                    show_error_popup(f"Failed to copy results to clipboard: {error_msg}")
+                    app.quit()
+                    
+            except Exception as e_format:
+                error_msg = handle_critical_error(e_format, "result formatting")
+                logging.error(f"Error in on_finished_slot: {e_format}", exc_info=True)
+                progress_dialog.close()
+                show_error_popup(f"Error formatting results: {error_msg}")
+                app.quit()
+
+        def on_error_slot(error_message):
+            logging.error(f"Processing error signal received: {error_message}")
+            progress_dialog.close()
+            show_error_popup(error_message)
+            app.quit()
+        
+        processing_thread.finished_signal.connect(on_finished_slot)
+        processing_thread.error_signal.connect(on_error_slot)
+        
+        logging.info(f"Starting processing thread for input: {input_path}")
+        processing_thread.start()
+        return app.exec_()
+        
+    except Exception as e:
+        error_msg = handle_critical_error(e, "application startup")
+        logging.critical(f"Critical error in main_app_logic: {e}", exc_info=True)
+        try:
+            show_error_popup(f"Critical application error: {error_msg}")
+        except:
+            print(f"CRITICAL ERROR: {error_msg}", file=sys.stderr)
+        return 1
 
 def profile_main():
     start_time = time.time()
-    setup_logging()
-    logging.info("Python garbage collection is currently disabled for the main application logic.")
-    logging.warning("Garbage collection is disabled. This may increase peak memory usage but can speed up processing for this utility.")
-    exit_code = main_app_logic()
-    total_duration = time.time() - start_time
-    logging.info(f"Total execution time: {total_duration:.2f} seconds")
-    return exit_code
+    
+    try:
+        setup_logging()
+        logging.info("Python garbage collection is currently disabled for the main application logic.")
+        logging.warning("Garbage collection is disabled. This may increase peak memory usage but can speed up processing for this utility.")
+        exit_code = main_app_logic()
+        total_duration = time.time() - start_time
+        logging.info(f"Total execution time: {total_duration:.2f} seconds")
+        return exit_code
+    except Exception as e:
+        error_msg = handle_critical_error(e, "application execution")
+        logging.critical(f"Critical error in profile_main: {e}", exc_info=True)
+        try:
+            show_error_popup(f"Application failed to start: {error_msg}")
+        except:
+            print(f"CRITICAL ERROR: {error_msg}", file=sys.stderr)
+        return 1
 
 if __name__ == "__main__":
-    if sys.platform.startswith('win'):
-        import multiprocessing
-        multiprocessing.freeze_support()
-    gc.disable()
-    final_exit_code = profile_main()
-    gc.enable()
-    logging.info("Python garbage collection re-enabled.")
-    logging.info("Application finished.")
-    sys.exit(final_exit_code)
+    try:
+        if sys.platform.startswith('win'):
+            import multiprocessing
+            multiprocessing.freeze_support()
+        gc.disable()
+        final_exit_code = profile_main()
+        gc.enable()
+        logging.info("Python garbage collection re-enabled.")
+        logging.info("Application finished.")
+        sys.exit(final_exit_code)
+    except Exception as e:
+        # Ultimate fallback for any unhandled exceptions
+        error_msg = f"Fatal application error: {str(e)}"
+        print(error_msg, file=sys.stderr)
+        try:
+            logging.critical(error_msg, exc_info=True)
+        except:
+            pass
+        sys.exit(1)
