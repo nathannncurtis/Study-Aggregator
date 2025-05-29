@@ -1,4 +1,47 @@
+import sys
 import os
+
+if getattr(sys, 'frozen', False):
+    # Create minimal mocks only for the most problematic modules
+    import types
+    
+    # Mock only the data-related modules that cause file access issues
+    problematic_modules = [
+        'pydicom.data.data_manager', 
+        'pydicom.data.download',
+        'pydicom.examples'
+    ]
+    
+    for module_name in problematic_modules:
+        if module_name not in sys.modules:
+            mock_module = types.ModuleType(module_name)
+            mock_module.__file__ = '<frozen>'
+            mock_module.__path__ = []
+            
+            # Add specific functions that might be called
+            if 'data_manager' in module_name:
+                mock_module.get_testdata_file = lambda *args, **kwargs: None
+                mock_module._get_testdata_file = lambda *args, **kwargs: None
+                mock_module.get_palette_files = lambda *args, **kwargs: []
+            elif 'download' in module_name:
+                mock_module.get_url_map = lambda: {}
+                mock_module.data_path_with_download = lambda *args, **kwargs: None
+                mock_module.get_data_root = lambda: os.getcwd()
+            elif 'examples' in module_name:
+                # Mock common example file attributes
+                for attr in ['ct', 'mr', 'rtplan', 'rtdose', 'rtstruct']:
+                    setattr(mock_module, attr, None)
+            
+            sys.modules[module_name] = mock_module
+    
+    # Also create a basic pydicom.data module to satisfy imports
+    if 'pydicom.data' not in sys.modules:
+        data_module = types.ModuleType('pydicom.data')
+        data_module.__file__ = '<frozen>'
+        data_module.__path__ = []
+        data_module.get_palette_files = lambda *args, **kwargs: []
+        sys.modules['pydicom.data'] = data_module
+
 import pydicom
 import clipboard
 from collections import defaultdict
@@ -23,7 +66,7 @@ import re
 
 # --- Enhanced Logging Setup ---
 def setup_logging():
-    """Setup comprehensive logging to catch all errors"""
+    """Setup comprehensive logging to catch all errors - more robust for frozen executables"""
     try:
         log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
         logger = logging.getLogger()
@@ -35,7 +78,36 @@ def setup_logging():
                 logger.removeHandler(handler)
 
         try:
-            log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dicom_aggregator.log")
+            # More robust path determination for frozen executables
+            if getattr(sys, 'frozen', False):
+                # We're running as frozen executable
+                if hasattr(sys, '_MEIPASS'):
+                    # PyInstaller
+                    app_dir = os.path.dirname(sys.executable)
+                else:
+                    # cx_Freeze - use executable directory
+                    app_dir = os.path.dirname(sys.executable)
+            else:
+                # Running as script
+                app_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            log_file_path = os.path.join(app_dir, "dicom_aggregator.log")
+            
+            # Test if we can write to the log directory
+            test_write_path = os.path.join(app_dir, "test_write.tmp")
+            try:
+                with open(test_write_path, 'w') as test_file:
+                    test_file.write("test")
+                os.remove(test_write_path)
+                log_writable = True
+            except Exception:
+                log_writable = False
+            
+            if not log_writable:
+                # Fallback to temp directory if app directory isn't writable
+                import tempfile
+                log_file_path = os.path.join(tempfile.gettempdir(), "dicom_aggregator.log")
+                print(f"WARNING: Cannot write to app directory, using temp log: {log_file_path}", file=sys.stderr)
             
             has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in logger.handlers)
             
@@ -43,19 +115,70 @@ def setup_logging():
                 file_handler = logging.FileHandler(log_file_path, mode='a')
                 file_handler.setFormatter(log_formatter)
                 logger.addHandler(file_handler)
+                print(f"Log file created at: {log_file_path}", file=sys.stderr)
             else:
-                pass
+                print(f"Using existing log file: {log_file_path}", file=sys.stderr)
                 
         except Exception as e:
             print(f"CRITICAL: Error setting up file logger: {e}", file=sys.stderr)
+            # Add console handler as fallback
+            console_handler = logging.StreamHandler(sys.stderr)
+            console_handler.setFormatter(log_formatter)
+            logger.addHandler(console_handler)
 
         logging.info("=== DICOM Aggregator Session Started ===")
         logging.info("Logging initialized. Output directed to dicom_aggregator.log")
+        logging.info(f"Running as frozen executable: {'Yes' if getattr(sys, 'frozen', False) else 'No'}")
+        logging.info(f"Executable path: {sys.executable if getattr(sys, 'frozen', False) else 'N/A'}")
+        logging.info(f"Command line args: {sys.argv}")
         return True
         
     except Exception as e:
         print(f"Critical: Failed to setup logging: {e}", file=sys.stderr)
         return False
+
+def debug_cd_drive_early(input_path):
+    """Early debugging for CD drive issues - prints to stderr immediately"""
+    try:
+        print(f"DEBUG: Early CD drive check for path: '{input_path}'", file=sys.stderr)
+        print(f"DEBUG: Path exists: {os.path.exists(input_path)}", file=sys.stderr)
+        print(f"DEBUG: Is file: {os.path.isfile(input_path)}", file=sys.stderr)
+        print(f"DEBUG: Is directory: {os.path.isdir(input_path)}", file=sys.stderr)
+        print(f"DEBUG: Current working directory: {os.getcwd()}", file=sys.stderr)
+        
+        if len(input_path) >= 2 and input_path[1] == ':':
+            drive_letter = input_path[0].upper()
+            print(f"DEBUG: Drive letter detected: {drive_letter}:", file=sys.stderr)
+            
+            try:
+                import ctypes
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive_letter}:\\")
+                drive_types = {0: "Unknown", 1: "Invalid", 2: "Removable", 3: "Fixed", 4: "Network", 5: "CD-ROM", 6: "RAM"}
+                drive_type_name = drive_types.get(drive_type, 'Unknown')
+                print(f"DEBUG: Drive type: {drive_type_name} ({drive_type})", file=sys.stderr)
+                
+                if drive_type == 5:  # CD-ROM
+                    print("DEBUG: CD-ROM drive detected!", file=sys.stderr)
+                    
+            except Exception as e:
+                print(f"DEBUG: Could not determine drive type: {e}", file=sys.stderr)
+                
+        # Test basic operations
+        try:
+            if os.path.exists(input_path):
+                if os.path.isdir(input_path):
+                    contents = os.listdir(input_path)
+                    print(f"DEBUG: Directory contains {len(contents)} items", file=sys.stderr)
+                elif os.path.isfile(input_path):
+                    size = os.path.getsize(input_path)
+                    print(f"DEBUG: File size: {size} bytes", file=sys.stderr)
+            else:
+                print("DEBUG: Path does not exist!", file=sys.stderr)
+        except Exception as e:
+            print(f"DEBUG: Error accessing path: {e}", file=sys.stderr)
+            
+    except Exception as e:
+        print(f"DEBUG: Error in early CD drive check: {e}", file=sys.stderr)
 
 # Enhanced error handling function
 def handle_critical_error(error, context="Unknown"):
@@ -293,7 +416,8 @@ def extract_study_info(dicom_file):
         ds = pydicom.dcmread(dicom_file, force=True, specific_tags=[
             "StudyDate", "StudyDescription", "SeriesDescription", "Modality",
             "PatientName", "PatientBirthDate", "PatientID", "StudyInstanceUID", 
-            "SeriesInstanceUID", "SeriesNumber"
+            "SeriesInstanceUID", "SeriesNumber", "ProtocolName", 
+            "RequestedProcedureDescription", "StudyComments"
         ], stop_before_pixels=True)
 
         patient_id = str(ds.get("PatientID", "")).strip()
@@ -304,6 +428,11 @@ def extract_study_info(dicom_file):
         study_instance_uid = str(ds.get("StudyInstanceUID", "")).strip()
         series_instance_uid = str(ds.get("SeriesInstanceUID", "")).strip()
         series_number = str(ds.get("SeriesNumber", "")).strip()
+        
+        # Get additional fields that might contain useful study information
+        protocol_name = str(ds.get("ProtocolName", "")).strip()
+        requested_procedure = str(ds.get("RequestedProcedureDescription", "")).strip()
+        study_comments = str(ds.get("StudyComments", "")).strip()
 
         # Normalize patient name
         patient_name_raw = ds.get("PatientName", "")
@@ -323,8 +452,43 @@ def extract_study_info(dicom_file):
         else:
             study_date = "Unknown"
 
-        # Build base description (study level)
-        base_description = study_description if study_description else "Study"
+        # Build base description (study level) with improved logic
+        base_description = None
+        
+        # Priority order for study description:
+        # 1. StudyDescription (if meaningful)
+        # 2. RequestedProcedureDescription (often contains procedure details)
+        # 3. ProtocolName (imaging protocol)
+        # 4. SeriesDescription (as fallback)
+        # 5. Modality + "Study" (last resort)
+        
+        if study_description and study_description.lower() not in ['study', 'unknown', '']:
+            base_description = study_description
+        elif requested_procedure and requested_procedure.lower() not in ['unknown', '']:
+            # Clean up procedure codes and make more readable
+            base_description = requested_procedure
+            # Remove common prefixes like CPT codes
+            if base_description.startswith(('73110', '73100', '73120', '73130')):
+                # Extract the meaningful part after the code
+                parts = base_description.split(' ', 1)
+                if len(parts) > 1:
+                    base_description = parts[1].title()
+        elif protocol_name and protocol_name.lower() not in ['unknown', '']:
+            base_description = protocol_name
+        elif series_description and series_description.lower() not in ['unknown', 'series', '']:
+            # Use series description but indicate it's from series level
+            base_description = f"{series_description} Study"
+        elif modality:
+            base_description = f"{modality} Study"
+        else:
+            base_description = "Study"
+        
+        # Clean up the description
+        if base_description:
+            # Remove redundant words and clean up
+            base_description = base_description.replace("  ", " ").strip()
+            # Capitalize first letter of each word for consistency
+            base_description = base_description.title()
         
         # Build series description
         if series_description:
@@ -347,12 +511,10 @@ def extract_study_info(dicom_file):
         }
         
         # Add more detailed logging for debugging
-        if base_description == "Study" or patient_name == "Unknown":
-            logging.warning(f"Potentially problematic DICOM file {dicom_file}: "
-                          f"StudyDesc='{study_description}', PatientName='{patient_name_raw}', "
-                          f"PatientID='{patient_id}', StudyUID='{study_instance_uid}'")
-        else:
-            logging.debug(f"Processed {os.path.basename(dicom_file)}: {patient_name} - {base_description}")
+        logging.debug(f"Processed {os.path.basename(dicom_file)}: "
+                     f"Patient='{patient_name}', Study='{base_description}', "
+                     f"Original StudyDesc='{study_description}', "
+                     f"ReqProc='{requested_procedure}', Protocol='{protocol_name}'")
         
         return result
 
@@ -749,6 +911,26 @@ class ProcessingThread(QThread):
     def run(self):
         try:
             set_busy_cursor()
+            
+            # Add debugging for CD drive issues
+            logging.info(f"ProcessingThread starting with path: '{self.input_path}'")
+            logging.info(f"Path type: {'File' if os.path.isfile(self.input_path) else 'Directory' if os.path.isdir(self.input_path) else 'Unknown'}")
+            logging.info(f"Path accessible: {os.path.exists(self.input_path)}")
+            
+            # Check drive type for additional debugging
+            if len(self.input_path) >= 2 and self.input_path[1] == ':':
+                drive_letter = self.input_path[0].upper()
+                logging.info(f"Processing drive: {drive_letter}:")
+                
+                # Try to get drive type (Windows specific)
+                try:
+                    import ctypes
+                    drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive_letter}:\\")
+                    drive_types = {0: "Unknown", 1: "Invalid", 2: "Removable", 3: "Fixed", 4: "Network", 5: "CD-ROM", 6: "RAM"}
+                    logging.info(f"Drive type: {drive_types.get(drive_type, 'Unknown')} ({drive_type})")
+                except Exception as e:
+                    logging.warning(f"Could not determine drive type: {e}")
+            
             all_studies = []
             
             if os.path.isfile(self.input_path) and self.input_path.lower().endswith('.zip'):
@@ -782,8 +964,8 @@ class ProcessingThread(QThread):
                 
                 try:
                     study_data = process_zip_file(self.input_path, thread_password, self.max_workers,
-                                                  lambda p, t: self.progress_updated.emit(p, t),
-                                                  0, self.max_nested_level)
+                                                lambda p, t: self.progress_updated.emit(p, t),
+                                                0, self.max_nested_level)
                     all_studies.extend(study_data)
                 except Exception as e:
                     if "WRONG_PASSWORD" in str(e):
@@ -985,13 +1167,117 @@ class ProcessingThread(QThread):
         self.progress_updated.emit(95, "Finalizing results from directory...")
         logging.info(f"Total studies found: {len(all_studies)} (from ZIPs and loose files)")
         return all_studies
+    
+def normalize_and_validate_path(input_path):
+    """Normalize path and handle CD/network drive issues"""
+    try:
+        # Log original path info
+        logging.info(f"Original input path: '{input_path}'")
+        logging.info(f"Path exists check: {os.path.exists(input_path)}")
+        logging.info(f"Path is absolute: {os.path.isabs(input_path)}")
+        logging.info(f"Current working directory: {os.getcwd()}")
+        
+        # Normalize the path
+        normalized_path = os.path.normpath(input_path)
+        logging.info(f"Normalized path: '{normalized_path}'")
+        
+        # Handle drive root case (like "H:\")
+        if len(normalized_path) == 3 and normalized_path.endswith(':\\'):
+            # It's a drive root, check if accessible
+            logging.info(f"Detected drive root: {normalized_path}")
+            
+            # Try to list directory contents to verify access
+            try:
+                contents = os.listdir(normalized_path)
+                logging.info(f"Drive root accessible, found {len(contents)} items")
+                return normalized_path
+            except (OSError, PermissionError) as e:
+                logging.error(f"Cannot access drive root {normalized_path}: {e}")
+                raise Exception(f"Cannot access drive {normalized_path}. Please ensure the drive is accessible and not write-protected.")
+        
+        # For other paths, ensure they exist and are accessible
+        if not os.path.exists(normalized_path):
+            logging.error(f"Path does not exist: {normalized_path}")
+            raise Exception(f"The specified path does not exist: '{normalized_path}'")
+        
+        # Test read access
+        if os.path.isdir(normalized_path):
+            try:
+                os.listdir(normalized_path)
+                logging.info("Directory access confirmed")
+            except (OSError, PermissionError) as e:
+                logging.error(f"Directory access denied: {e}")
+                raise Exception(f"Cannot access directory '{normalized_path}'. Check permissions.")
+        
+        return normalized_path
+        
+    except Exception as e:
+        logging.error(f"Path validation failed: {e}")
+        raise
+
+def handle_cd_drive_compatibility():
+    """Handle compatibility issues with CD drives and frozen executables"""
+    if getattr(sys, 'frozen', False):
+        try:
+            # Change working directory to executable location for better compatibility
+            exe_dir = os.path.dirname(sys.executable)
+            original_cwd = os.getcwd()
+            
+            logging.info(f"Frozen executable detected")
+            logging.info(f"Executable location: {exe_dir}")
+            logging.info(f"Original working directory: {original_cwd}")
+            
+            # Only change if we're not already in the exe directory
+            if original_cwd != exe_dir:
+                os.chdir(exe_dir)
+                logging.info(f"Changed working directory to: {os.getcwd()}")
+            
+            # Set some environment variables that might help with drive access
+            os.environ['TEMP'] = os.environ.get('TEMP', tempfile.gettempdir())
+            os.environ['TMP'] = os.environ.get('TMP', tempfile.gettempdir())
+            
+        except Exception as e:
+            logging.warning(f"Could not optimize environment for frozen executable: {e}")
+
+def clean_input_path(raw_path):
+    """Clean up input path from command line arguments"""
+    try:
+        logging.info(f"Cleaning raw input path: '{raw_path}'")
+        
+        # Remove surrounding quotes if present
+        cleaned_path = raw_path.strip('"\'')
+        
+        # Handle the case where path ends with quote but should end with backslash
+        if len(cleaned_path) >= 2 and cleaned_path[1] == ':' and cleaned_path.endswith('"'):
+            # It's a drive letter with trailing quote, replace with backslash
+            cleaned_path = cleaned_path[:-1] + '\\'
+            logging.info(f"Detected drive path with trailing quote, corrected to: '{cleaned_path}'")
+        elif len(cleaned_path) == 2 and cleaned_path[1] == ':':
+            # It's just a drive letter like "H:", add backslash
+            cleaned_path = cleaned_path + '\\'
+            logging.info(f"Detected bare drive letter, corrected to: '{cleaned_path}'")
+        elif len(cleaned_path) >= 2 and cleaned_path[1] == ':' and not cleaned_path.endswith('\\'):
+            # It's a drive path but missing trailing backslash
+            cleaned_path = cleaned_path + '\\'
+            logging.info(f"Added missing trailing backslash: '{cleaned_path}'")
+        
+        logging.info(f"Cleaned path result: '{cleaned_path}'")
+        return cleaned_path
+        
+    except Exception as e:
+        logging.error(f"Error cleaning input path '{raw_path}': {e}")
+        return raw_path
 
 def main_app_logic():
     try:
+        # Handle CD drive compatibility first
+        handle_cd_drive_compatibility()
+        
         cpu_cores = os.cpu_count() if os.cpu_count() is not None else 1
         max_workers = min(cpu_cores, 8) 
         logging.info(f"Using up to {max_workers} worker threads.")
         logging.info(f"7zip available: {'Yes' if SEVEN_ZIP_PATH else 'No'}")
+        logging.info(f"Running as frozen executable: {'Yes' if getattr(sys, 'frozen', False) else 'No'}")
         
         app = QApplication.instance() or QApplication(sys.argv)
         
@@ -1001,17 +1287,30 @@ def main_app_logic():
             show_error_popup(error_msg)
             return 1
             
-        input_path = sys.argv[1]
-        if not os.path.exists(input_path):
-            error_msg = f"The specified path does not exist: '{input_path}'. Please verify the path and try again."
-            logging.error(f"Input path does not exist: {input_path}")
+        raw_input_path = sys.argv[1]
+        logging.info(f"Raw command line argument: '{raw_input_path}'")
+        
+        # Clean up the input path - ADD THIS LINE
+        input_path = clean_input_path(raw_input_path)
+        logging.info(f"Cleaned input path: '{input_path}'")
+        
+        # Add early CD drive debugging
+        debug_cd_drive_early(input_path)
+        
+        # Normalize and validate the path
+        try:
+            validated_path = normalize_and_validate_path(input_path)
+            logging.info(f"Using validated path: '{validated_path}'")
+        except Exception as path_error:
+            error_msg = str(path_error)
+            logging.error(f"Path validation failed: {error_msg}")
             show_error_popup(error_msg)
             return 1
             
         progress_dialog = ProgressDialog("Processing DICOM Files")
         progress_dialog.show()
         
-        processing_thread = ProcessingThread(input_path, max_workers)
+        processing_thread = ProcessingThread(validated_path, max_workers)
         
         def update_progress_slot(value, text):
             try:
@@ -1156,7 +1455,7 @@ def main_app_logic():
         processing_thread.finished_signal.connect(on_finished_slot)
         processing_thread.error_signal.connect(on_error_slot)
         
-        logging.info(f"Starting processing thread for input: {input_path}")
+        logging.info(f"Starting processing thread for input: {validated_path}")  # Use validated_path here too
         processing_thread.start()
         return app.exec_()
         
