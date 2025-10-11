@@ -48,7 +48,9 @@ from collections import defaultdict
 import pyzipper
 import shutil
 import tempfile
-from PyQt5.QtWidgets import QApplication, QMessageBox, QInputDialog, QLineEdit, QProgressBar, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (QApplication, QMessageBox, QInputDialog, QLineEdit, QProgressBar,
+                              QLabel, QVBoxLayout, QWidget, QPushButton, QDialog, QCheckBox,
+                              QFileDialog, QHBoxLayout)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
 import time
@@ -63,6 +65,19 @@ import logging
 import traceback
 import subprocess
 import re
+import json
+from pathlib import Path
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+    logging.warning("ReportLab not available. PDF generation will be limited.")
 
 # --- Enhanced Logging Setup ---
 def setup_logging():
@@ -266,6 +281,51 @@ def find_7zip():
 # Global 7zip path
 SEVEN_ZIP_PATH = find_7zip()
 
+# Settings management
+def get_settings_file():
+    """Get the path to the settings file"""
+    try:
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(app_dir, 'dicom_aggregator_settings.json')
+    except Exception as e:
+        logging.error(f"Error determining settings file path: {e}")
+        return os.path.join(os.path.expanduser("~"), 'dicom_aggregator_settings.json')
+
+def load_settings():
+    """Load settings from file"""
+    settings_file = get_settings_file()
+    default_settings = {
+        'last_save_directory': str(Path.home() / "Desktop"),
+        'output_mode': 'clipboard'  # 'clipboard', 'pdf', or 'both'
+    }
+
+    try:
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+                # Ensure all default keys exist
+                for key, value in default_settings.items():
+                    if key not in settings:
+                        settings[key] = value
+                return settings
+    except Exception as e:
+        logging.warning(f"Error loading settings: {e}")
+
+    return default_settings
+
+def save_settings(settings):
+    """Save settings to file"""
+    settings_file = get_settings_file()
+    try:
+        with open(settings_file, 'w') as f:
+            json.dump(settings, f, indent=2)
+        logging.info(f"Settings saved to {settings_file}")
+    except Exception as e:
+        logging.error(f"Error saving settings: {e}")
+
 class ProgressDialog(QWidget):
     def __init__(self, title="Processing"):
         super().__init__()
@@ -276,22 +336,40 @@ class ProgressDialog(QWidget):
                 self.setWindowIcon(QIcon(icon_path))
             else:
                 logging.warning(f"Icon file not found at {icon_path}, not setting window icon for ProgressDialog.")
-            
+
             layout = QVBoxLayout()
-            
+
             self.label = QLabel("Processing files...")
             layout.addWidget(self.label)
-            
+
             self.progress_bar = QProgressBar()
             self.progress_bar.setMinimum(0)
             self.progress_bar.setMaximum(100)
             layout.addWidget(self.progress_bar)
-            
+
+            # Add pause/resume button
+            self.pause_button = QPushButton("Pause")
+            self.pause_button.clicked.connect(self.toggle_pause)
+            layout.addWidget(self.pause_button)
+
             self.setLayout(layout)
-            self.resize(400, 100)
+            self.resize(400, 150)
+            self.is_paused = False
         except Exception as e:
             logging.error(f"Error initializing ProgressDialog: {e}", exc_info=True)
-        
+
+    def toggle_pause(self):
+        try:
+            self.is_paused = not self.is_paused
+            if self.is_paused:
+                self.pause_button.setText("Resume")
+                logging.info("Processing paused by user")
+            else:
+                self.pause_button.setText("Pause")
+                logging.info("Processing resumed by user")
+        except Exception as e:
+            logging.error(f"Error toggling pause: {e}")
+
     def update_progress(self, value, text=None):
         try:
             self.progress_bar.setValue(value)
@@ -299,9 +377,46 @@ class ProgressDialog(QWidget):
                 self.label.setText(text)
         except Exception as e:
             logging.error(f"Error updating progress: {e}")
-            
+
     def closeEvent(self, event):
         event.ignore()
+
+class OutputModeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Output Mode")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint)
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        layout = QVBoxLayout()
+
+        label = QLabel("How would you like to save the results?")
+        layout.addWidget(label)
+
+        self.clipboard_checkbox = QCheckBox("Copy to Clipboard")
+        self.clipboard_checkbox.setChecked(True)
+        layout.addWidget(self.clipboard_checkbox)
+
+        self.pdf_checkbox = QCheckBox("Save as PDF")
+        layout.addWidget(self.pdf_checkbox)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+        self.resize(300, 150)
+
+    def get_selection(self):
+        """Return tuple (clipboard, pdf)"""
+        return (self.clipboard_checkbox.isChecked(), self.pdf_checkbox.isChecked())
 
 def show_error_popup(message):
     logging.error(f"Displaying error popup: {message}")
@@ -320,6 +435,420 @@ def show_error_popup(message):
         logging.error(f"Failed to show error popup: {e}", exc_info=True)
         # Fallback to console output
         print(f"ERROR: {message}", file=sys.stderr)
+
+def generate_markdown_report(patients_data, settings):
+    """Generate a Markdown report from patient data"""
+    try:
+        # Build Markdown content
+        md_parts = []
+
+        # Header
+        md_parts.append(f"# DICOM Study Report\n\n")
+        md_parts.append(f"**Generated on:** {time.strftime('%B %d, %Y at %I:%M %p')}\n\n")
+        md_parts.append("---\n\n")
+
+        # Get facility info from first patient with data
+        facility_name = None
+        facility_address = None
+        facility_dept = None
+
+        for patient in patients_data.values():
+            if patient.get('institution_name'):
+                facility_name = patient.get('institution_name')
+                facility_address = patient.get('institution_address')
+                facility_dept = patient.get('department_name')
+                break
+
+        # Add facility info if available
+        if facility_name:
+            md_parts.append(f"## Facility Information\n\n")
+            md_parts.append(f"**Institution:** {facility_name}\n\n")
+            if facility_dept:
+                md_parts.append(f"**Department:** {facility_dept}\n\n")
+            if facility_address:
+                md_parts.append(f"**Address:** {facility_address}\n\n")
+            md_parts.append("---\n\n")
+
+        # Sort patients
+        def sort_patients(patient_data):
+            try:
+                pid = patient_data.get('patient_id') or 'ZZZZ'
+                name = patient_data.get('patient_name', 'Unknown')
+                try:
+                    if pid and pid.isdigit():
+                        pid_val = pid.zfill(10)
+                    else:
+                        pid_val = str(pid) if pid else 'ZZZZ'
+                except:
+                    pid_val = str(pid) if pid else 'ZZZZ'
+                return (pid_val, name.lower())
+            except Exception as e:
+                logging.warning(f"Error sorting patient data: {e}")
+                return ('ZZZZ', 'unknown')
+
+        sorted_patients = sorted(patients_data.values(), key=sort_patients)
+
+        # Add patient data
+        for patient in sorted_patients:
+            try:
+                pid = patient.get('patient_id', '')
+                name = patient.get('patient_name', 'Unknown')
+                dob = patient.get('patient_dob', 'Unknown')
+
+                # Patient header
+                md_parts.append(f"## NAME: {name} | DOB: {dob} | ID: {pid if pid else 'Unknown'}\n\n")
+                md_parts.append(f"### STUDIES\n\n")
+
+                # Studies table
+                md_parts.append("| Date | Study Description | Series Count |\n")
+                md_parts.append("|------|-------------------|-------------|\n")
+
+                studies_dict = patient.get('studies', {})
+                if isinstance(studies_dict, dict) and studies_dict:
+                    sorted_studies = sorted(studies_dict.values(),
+                                          key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
+
+                    for study in sorted_studies:
+                        study_date = study.get('study_date', 'Unknown')
+                        study_desc = study.get('study_description', 'Unknown')
+                        all_series = study.get('all_series', set())
+                        series_count = len(all_series)
+
+                        md_parts.append(f"| {study_date} | {study_desc} | {series_count} series |\n")
+
+                md_parts.append("\n---\n\n")
+
+            except Exception as e:
+                logging.error(f"Error formatting patient data for Markdown: {e}")
+                continue
+
+        return ''.join(md_parts)
+
+    except Exception as e:
+        logging.error(f"Error generating Markdown report: {e}", exc_info=True)
+        return None
+
+def markdown_to_html_with_styling(markdown_content):
+    """Convert Markdown to styled HTML"""
+    # Simple markdown to HTML converter (basic implementation)
+    html_parts = []
+
+    # Add HTML header with styling
+    html_parts.append("""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>DICOM Study Report</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+            text-align: center;
+        }
+        h2 {
+            color: white;
+            background-color: #4CAF50;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 30px;
+        }
+        h3 {
+            color: white;
+            background-color: #2196F3;
+            padding: 8px;
+            border-radius: 3px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        hr {
+            border: none;
+            border-top: 2px solid #333;
+            margin: 30px 0;
+        }
+        strong {
+            color: #333;
+        }
+        p {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+""")
+
+    # Process markdown line by line
+    lines = markdown_content.split('\n')
+    in_table = False
+    table_header_processed = False
+
+    for i, line in enumerate(lines):
+        # Headers
+        if line.startswith('# '):
+            html_parts.append(f'<h1>{line[2:]}</h1>\n')
+        elif line.startswith('## '):
+            html_parts.append(f'<h2>{line[3:]}</h2>\n')
+        elif line.startswith('### '):
+            html_parts.append(f'<h3>{line[4:]}</h3>\n')
+        # Horizontal rule
+        elif line.strip() == '---':
+            html_parts.append('<hr>\n')
+        # Table
+        elif line.startswith('|'):
+            if not in_table:
+                html_parts.append('<table>\n')
+                in_table = True
+                table_header_processed = False
+
+            # Skip separator line
+            if '---' in line:
+                table_header_processed = True
+                continue
+
+            # Process table row
+            cells = [cell.strip() for cell in line.split('|')[1:-1]]  # Remove empty first and last
+            if not table_header_processed:
+                html_parts.append('<tr>')
+                for cell in cells:
+                    # Process bold
+                    cell = cell.replace('**', '<strong>').replace('**', '</strong>')
+                    html_parts.append(f'<th>{cell}</th>')
+                html_parts.append('</tr>\n')
+            else:
+                html_parts.append('<tr>')
+                for cell in cells:
+                    # Process bold
+                    cell = cell.replace('**', '<strong>').replace('**', '</strong>')
+                    html_parts.append(f'<td>{cell}</td>')
+                html_parts.append('</tr>\n')
+        else:
+            # Close table if we were in one
+            if in_table and not line.startswith('|'):
+                html_parts.append('</table>\n')
+                in_table = False
+                table_header_processed = False
+
+            # Regular paragraph
+            if line.strip():
+                # Process bold
+                processed_line = line
+                # Simple bold replacement (handles **text**)
+                while '**' in processed_line:
+                    processed_line = processed_line.replace('**', '<strong>', 1)
+                    processed_line = processed_line.replace('**', '</strong>', 1)
+                html_parts.append(f'<p>{processed_line}</p>\n')
+            else:
+                html_parts.append('\n')
+
+    # Close table if still open
+    if in_table:
+        html_parts.append('</table>\n')
+
+    html_parts.append('</body>\n</html>')
+
+    return ''.join(html_parts)
+
+def save_markdown_as_pdf(markdown_content, save_path):
+    """Save Markdown content as PDF using ReportLab - simple black and white format"""
+    try:
+        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
+        logging.info(f"Input save_path: {save_path}")
+        logging.info(f"Markdown content length: {len(markdown_content)}")
+        logging.info(f"ReportLab available: {REPORTLAB_AVAILABLE}")
+
+        # Ensure save_path has .pdf extension
+        if not save_path.lower().endswith('.pdf'):
+            save_path = save_path + '.pdf'
+
+        # Save as PDF using ReportLab if available
+        if REPORTLAB_AVAILABLE:
+            try:
+                logging.info(f"Converting Markdown to PDF using ReportLab...")
+
+                # Create PDF document
+                doc = SimpleDocTemplate(save_path, pagesize=letter,
+                                       rightMargin=40, leftMargin=40,
+                                       topMargin=40, bottomMargin=40)
+
+                # Container for PDF elements
+                story = []
+
+                # Define styles
+                styles = getSampleStyleSheet()
+
+                # Simple black and white styles
+                title_style = ParagraphStyle(
+                    'Title',
+                    parent=styles['Heading1'],
+                    fontSize=16,
+                    textColor=colors.black,
+                    spaceAfter=20,
+                    alignment=TA_LEFT,
+                    fontName='Helvetica-Bold'
+                )
+
+                heading_style = ParagraphStyle(
+                    'Heading',
+                    parent=styles['Normal'],
+                    fontSize=11,
+                    textColor=colors.black,
+                    spaceAfter=6,
+                    spaceBefore=6,
+                    fontName='Helvetica-Bold'
+                )
+
+                normal_style = styles['Normal']
+
+                # Add main header
+                story.append(Paragraph("X-RAY BREAKDOWN", title_style))
+                story.append(Spacer(1, 0.3*inch))
+
+                # Parse markdown and build PDF
+                lines = markdown_content.split('\n')
+                i = 0
+
+                # Extract facility info first
+                facility_info = []
+                while i < len(lines):
+                    line = lines[i].strip()
+                    if 'Facility Information' in line:
+                        i += 1
+                        # Get next lines until we hit a separator
+                        while i < len(lines) and lines[i].strip() != '---':
+                            line = lines[i].strip()
+                            if line.startswith('**'):
+                                # Remove ** and extract info
+                                clean_line = line.replace('**', '')
+                                facility_info.append(clean_line)
+                            i += 1
+                        break
+                    i += 1
+
+                # Add facility info if found
+                if facility_info:
+                    for info in facility_info:
+                        story.append(Paragraph(info, normal_style))
+                    story.append(Spacer(1, 0.2*inch))
+
+                # Reset to parse patient data
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+
+                    # Patient header (NAME: ... | DOB: ... | ID: ...)
+                    if line.startswith('## NAME:'):
+                        # Extract just the text without the ##
+                        patient_info = line[3:]
+                        story.append(Paragraph(patient_info, heading_style))
+                        story.append(Spacer(1, 0.05*inch))
+
+                    # STUDIES header - just add small space, don't print it
+                    elif line.startswith('### STUDIES'):
+                        story.append(Spacer(1, 0.05*inch))
+
+                    # Table
+                    elif line.startswith('|') and 'Date' in line:
+                        # Collect all table rows
+                        table_data = []
+                        while i < len(lines) and lines[i].strip().startswith('|'):
+                            row_line = lines[i].strip()
+                            # Skip separator line
+                            if '---' not in row_line:
+                                cells = [cell.strip() for cell in row_line.split('|')[1:-1]]
+                                table_data.append(cells)
+                            i += 1
+                        i -= 1  # Back up one since we'll increment at the end of loop
+
+                        if table_data:
+                            # Create simple table
+                            table = Table(table_data, hAlign='LEFT')
+
+                            # Simple black and white table style
+                            table_style = TableStyle([
+                                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                                ('TOPPADDING', (0, 0), (-1, 0), 8),
+                                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                            ])
+                            table.setStyle(table_style)
+                            story.append(table)
+                            story.append(Spacer(1, 0.15*inch))
+
+                    i += 1
+
+                # Build PDF
+                doc.build(story)
+
+                # Verify file was created
+                if os.path.exists(save_path):
+                    file_size = os.path.getsize(save_path)
+                    logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
+                    return save_path
+                else:
+                    logging.error(f"PDF file was NOT created at {save_path}")
+                    # Fallback to HTML
+                    html_path = save_path.replace('.pdf', '.html')
+                    html_content = markdown_to_html_with_styling(markdown_content)
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                    logging.info(f"Saved HTML fallback to {html_path}")
+                    return html_path
+
+            except Exception as pdf_error:
+                logging.error(f"ReportLab PDF generation failed: {pdf_error}", exc_info=True)
+                # Fallback to HTML
+                html_path = save_path.replace('.pdf', '.html')
+                html_content = markdown_to_html_with_styling(markdown_content)
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                logging.info(f"PDF generation failed, saved HTML instead to {html_path}")
+                return html_path
+        else:
+            # ReportLab not available, save as HTML
+            html_path = save_path.replace('.pdf', '.html')
+            logging.warning("ReportLab not available, saving as HTML instead")
+
+            html_content = markdown_to_html_with_styling(markdown_content)
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+
+            if os.path.exists(html_path):
+                file_size = os.path.getsize(html_path)
+                logging.info(f"HTML report saved to {html_path}, size: {file_size} bytes")
+                logging.info("To enable PDF generation, install ReportLab: pip install reportlab")
+                return html_path
+            else:
+                logging.error(f"File was NOT created at {html_path}")
+                return None
+
+    except Exception as e:
+        logging.error(f"Error saving report: {e}", exc_info=True)
+        return None
 
 def show_success_popup(message):
     logging.info(f"Displaying success popup: {message}")
@@ -406,7 +935,7 @@ def names_match(name1, name2):
         logging.warning(f"Error matching names '{name1}' and '{name2}': {e}")
         return False
 
-@lru_cache(maxsize=2000)
+@lru_cache(maxsize=10000)
 def extract_study_info(dicom_file):
     try:
         if os.path.getsize(dicom_file) < 132:
@@ -415,9 +944,10 @@ def extract_study_info(dicom_file):
 
         ds = pydicom.dcmread(dicom_file, force=True, specific_tags=[
             "StudyDate", "StudyDescription", "SeriesDescription", "Modality",
-            "PatientName", "PatientBirthDate", "PatientID", "StudyInstanceUID", 
-            "SeriesInstanceUID", "SeriesNumber", "ProtocolName", 
-            "RequestedProcedureDescription", "StudyComments"
+            "PatientName", "PatientBirthDate", "PatientID", "StudyInstanceUID",
+            "SeriesInstanceUID", "SeriesNumber", "ProtocolName",
+            "RequestedProcedureDescription", "StudyComments",
+            "InstitutionName", "InstitutionAddress", "InstitutionalDepartmentName"
         ], stop_before_pixels=True)
 
         patient_id = str(ds.get("PatientID", "")).strip()
@@ -496,6 +1026,11 @@ def extract_study_info(dicom_file):
         else:
             series_desc = f"Series {series_number}" if series_number else "Unknown Series"
 
+        # Extract facility/institution information
+        institution_name = str(ds.get("InstitutionName", "")).strip()
+        institution_address = str(ds.get("InstitutionAddress", "")).strip()
+        department_name = str(ds.get("InstitutionalDepartmentName", "")).strip()
+
         # Return raw data for study/series grouping
         result = {
             'patient_id': patient_id or None,
@@ -507,7 +1042,10 @@ def extract_study_info(dicom_file):
             'modality': modality,
             'study_instance_uid': study_instance_uid or None,
             'series_instance_uid': series_instance_uid or None,
-            'series_number': series_number or None
+            'series_number': series_number or None,
+            'institution_name': institution_name or None,
+            'institution_address': institution_address or None,
+            'department_name': department_name or None
         }
         
         # Add more detailed logging for debugging
@@ -760,7 +1298,10 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
         logging.info(f"Successfully removed temp directory: {temp_dir}")
     except Exception as e:
         logging.error(f"Error removing temp directory {temp_dir}: {e}")
+
+    # Strategic garbage collection after processing each ZIP
     gc.collect()
+
     return found_studies
 
 def find_zip_files(directory):
@@ -845,10 +1386,18 @@ def merge_patients(studies_list):
             if matched_key:
                 # Merge with existing patient
                 existing = patients[matched_key]
-                
+
                 # Update DOB if current study has one and existing doesn't
                 if patient_dob != 'Unknown' and existing.get('patient_dob') == 'Unknown':
                     existing['patient_dob'] = patient_dob
+
+                # Update facility information if available and not already set
+                if not existing.get('institution_name') and study.get('institution_name'):
+                    existing['institution_name'] = study.get('institution_name')
+                if not existing.get('institution_address') and study.get('institution_address'):
+                    existing['institution_address'] = study.get('institution_address')
+                if not existing.get('department_name') and study.get('department_name'):
+                    existing['department_name'] = study.get('department_name')
             else:
                 # Create new patient entry
                 patient_key = f"{patient_name}_{patient_dob}_{patient_id or 'NO_ID'}"
@@ -856,7 +1405,10 @@ def merge_patients(studies_list):
                     'patient_id': patient_id,
                     'patient_name': patient_name,
                     'patient_dob': patient_dob,
-                    'studies': {}
+                    'studies': {},
+                    'institution_name': study.get('institution_name'),
+                    'institution_address': study.get('institution_address'),
+                    'department_name': study.get('department_name')
                 }
                 matched_key = patient_key
                 logging.debug(f"Created new patient entry: {patient_key}")
@@ -902,11 +1454,18 @@ class ProcessingThread(QThread):
     finished_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, input_path, max_workers):
+    def __init__(self, input_path, max_workers, progress_dialog=None):
         super().__init__()
         self.input_path = input_path
         self.max_workers = max_workers
         self.max_nested_level = 5
+        self.progress_dialog = progress_dialog
+
+    def check_pause(self):
+        """Check if processing is paused and wait until resumed"""
+        if self.progress_dialog:
+            while self.progress_dialog.is_paused:
+                time.sleep(0.1)  # Check every 100ms
 
     def run(self):
         try:
@@ -1034,16 +1593,39 @@ class ProcessingThread(QThread):
             
     def extract_directory_info(self):
         all_studies = []
-        self.progress_updated.emit(0, "Scanning for zip files...")
-        
+        self.progress_updated.emit(0, "Scanning directory...")
+
+        # Single pass directory traversal - collect all files at once
+        zip_files = []
+        all_potential_dicom_files = []
+        total_files_scanned = 0
+
         try:
-            zip_files = find_zip_files(self.input_path)
+            for root, dirs, files in os.walk(self.input_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]  # Skip hidden directories
+                for file_name in files:
+                    total_files_scanned += 1
+                    file_path = os.path.join(root, file_name)
+                    file_lower = file_name.lower()
+
+                    if file_lower.endswith('.zip'):
+                        zip_files.append(file_path)
+                    else:
+                        # Check if it could be a DICOM file
+                        ext = os.path.splitext(file_name)[1].lower()
+                        if ext in ('.dcm', '.ima', '.dicom', '') or not ext:
+                            all_potential_dicom_files.append(file_path)
+
+                    # Update progress every 500 files during scan
+                    if total_files_scanned % 500 == 0:
+                        self.progress_updated.emit(0, f"Scanning directory... ({total_files_scanned} files found)")
+
+            logging.info(f"Directory scan complete: {len(zip_files)} ZIP files, {len(all_potential_dicom_files)} potential DICOM files")
         except Exception as e:
-            logging.error(f"Error scanning for ZIP files: {e}")
-            zip_files = []
-        
+            logging.error(f"Error scanning directory: {e}")
+
         thread_shared_password = None
-        
+
         # Process ZIP files if found
         if zip_files:
             self.progress_updated.emit(5, f"Found {len(zip_files)} zip files. Checking for encryption...")
@@ -1080,6 +1662,7 @@ class ProcessingThread(QThread):
             
             # Process ZIP files (use 60% of progress for ZIPs)
             for i, zip_path_process in enumerate(zip_files):
+                self.check_pause()  # Check if paused before processing each ZIP
                 current_zip_password_to_use = thread_shared_password if password_needed_flags.get(zip_path_process, False) else None
                 progress_start_zip = 15 + int((i / len(zip_files)) * 45)  # 15-60%
                 progress_end_zip = 15 + int(((i + 1) / len(zip_files)) * 45)
@@ -1089,7 +1672,7 @@ class ProcessingThread(QThread):
                         self.progress_updated.emit(scaled_percent, text)
                 try:
                     self.progress_updated.emit(progress_start_zip, f"Processing zip {i+1}/{len(zip_files)}: {os.path.basename(zip_path_process)}")
-                    found_studies_in_zip = process_zip_file(zip_path_process, current_zip_password_to_use, self.max_workers, 
+                    found_studies_in_zip = process_zip_file(zip_path_process, current_zip_password_to_use, self.max_workers,
                                                             zip_progress_callback, 0, self.max_nested_level)
                     all_studies.extend(found_studies_in_zip)
                 except Exception as e_proc:
@@ -1100,38 +1683,11 @@ class ProcessingThread(QThread):
                         logging.error(f"Error processing zip {zip_path_process} in directory: {e_proc}", exc_info=True)
                         self.progress_updated.emit(progress_end_zip, f"Error with {os.path.basename(zip_path_process)}: {str(e_proc)[:50]}")
         
-        # ALWAYS process loose DICOM files in addition to ZIPs (use remaining 40% of progress)
+        # Process loose DICOM files (use remaining 40% of progress)
+        # Files were already collected during initial directory scan
         progress_start_dicom = 60 if zip_files else 0
-        self.progress_updated.emit(progress_start_dicom, "Scanning for loose DICOM files...")
-        
-        all_potential_dicom_files = []
-        self.progress_updated.emit(progress_start_dicom + 5, "Analyzing file types for loose DICOMs...")
-        file_scan_count, total_files_to_scan = 0, 0
-        
-        try:
-            # Count total files first
-            for root, _, files in os.walk(self.input_path):
-                for file_name in files:
-                    if not file_name.lower().endswith('.zip'):  # Skip ZIP files we already processed
-                        total_files_to_scan += 1
-            
-            # Find potential DICOM files
-            for root, _, files in os.walk(self.input_path):
-                for file_name in files:
-                    if file_name.lower().endswith('.zip'):  # Skip ZIP files
-                        continue
-                        
-                    file_scan_count += 1
-                    if file_scan_count % 200 == 0 and total_files_to_scan > 0:
-                        progress_val = progress_start_dicom + 5 + int((file_scan_count / total_files_to_scan) * 15)
-                        self.progress_updated.emit(progress_val, f"Analyzing file types: {file_scan_count}/{total_files_to_scan}")
-                    
-                    file_path, ext = os.path.join(root, file_name), os.path.splitext(file_name)[1].lower()
-                    if ext in ('.dcm', '.ima', '.dicom', '') or not ext:
-                        all_potential_dicom_files.append(file_path)
-        except Exception as e:
-            logging.error(f"Error scanning for loose DICOM files: {e}")
-        
+        self.progress_updated.emit(progress_start_dicom, f"Found {len(all_potential_dicom_files)} potential loose DICOM files...")
+
         logging.info(f"Found {len(all_potential_dicom_files)} potential loose DICOM files")
         
         # Validate and process loose DICOM files
@@ -1139,7 +1695,9 @@ class ProcessingThread(QThread):
         if all_potential_dicom_files:
             self.progress_updated.emit(progress_start_dicom + 20, f"Validating {len(all_potential_dicom_files)} potential DICOM files...")
             for i, pf_path in enumerate(all_potential_dicom_files):
-                if (i+1) % 50 == 0:
+                # Check for pause every 10 files
+                if (i+1) % 10 == 0:
+                    self.check_pause()
                     progress_val = progress_start_dicom + 20 + int(((i+1) / len(all_potential_dicom_files)) * 15)
                     self.progress_updated.emit(progress_val, f"Validating DICOMs: {i+1}/{len(all_potential_dicom_files)}")
                 if is_valid_dicom_file(pf_path):
@@ -1155,15 +1713,20 @@ class ProcessingThread(QThread):
                 total_to_process = len(dicom_files_confirmed)
                 for future in concurrent.futures.as_completed(futures):
                     processed_count += 1
-                    progress_val = progress_start_dicom + 35 + int((processed_count / total_to_process) * 25)
-                    self.progress_updated.emit(progress_val, f"Processing loose DICOMs: {processed_count}/{total_to_process}")
+                    # Throttle progress updates to every 10 files
+                    if processed_count % 10 == 0 or processed_count == total_to_process:
+                        progress_val = progress_start_dicom + 35 + int((processed_count / total_to_process) * 25)
+                        self.progress_updated.emit(progress_val, f"Processing loose DICOMs: {processed_count}/{total_to_process}")
                     result = future.result()
                     if result:
                         study_info, file_path_processed = result
-                        if study_info: 
+                        if study_info:
                             study_info['source_path'] = file_path_processed
                             all_studies.append(study_info)
-        
+
+            # Strategic garbage collection after processing DICOM files
+            gc.collect()
+
         self.progress_updated.emit(95, "Finalizing results from directory...")
         logging.info(f"Total studies found: {len(all_studies)} (from ZIPs and loose files)")
         return all_studies
@@ -1243,27 +1806,23 @@ def clean_input_path(raw_path):
     """Clean up input path from command line arguments"""
     try:
         logging.info(f"Cleaning raw input path: '{raw_path}'")
-        
+
         # Remove surrounding quotes if present
         cleaned_path = raw_path.strip('"\'')
-        
-        # Handle the case where path ends with quote but should end with backslash
-        if len(cleaned_path) >= 2 and cleaned_path[1] == ':' and cleaned_path.endswith('"'):
-            # It's a drive letter with trailing quote, replace with backslash
-            cleaned_path = cleaned_path[:-1] + '\\'
-            logging.info(f"Detected drive path with trailing quote, corrected to: '{cleaned_path}'")
-        elif len(cleaned_path) == 2 and cleaned_path[1] == ':':
-            # It's just a drive letter like "H:", add backslash
+
+        # Only add backslash for drive roots (like "H:" or "C:")
+        # Don't add it for full paths with files or directories
+        if len(cleaned_path) == 2 and cleaned_path[1] == ':':
+            # It's just a bare drive letter like "H:", add backslash
             cleaned_path = cleaned_path + '\\'
             logging.info(f"Detected bare drive letter, corrected to: '{cleaned_path}'")
-        elif len(cleaned_path) >= 2 and cleaned_path[1] == ':' and not cleaned_path.endswith('\\'):
-            # It's a drive path but missing trailing backslash
-            cleaned_path = cleaned_path + '\\'
-            logging.info(f"Added missing trailing backslash: '{cleaned_path}'")
-        
+        elif len(cleaned_path) == 3 and cleaned_path[1] == ':' and cleaned_path[2] == '\\':
+            # It's already a proper drive root like "H:\", leave it alone
+            logging.info(f"Detected drive root: '{cleaned_path}'")
+
         logging.info(f"Cleaned path result: '{cleaned_path}'")
         return cleaned_path
-        
+
     except Exception as e:
         logging.error(f"Error cleaning input path '{raw_path}': {e}")
         return raw_path
@@ -1274,13 +1833,89 @@ def main_app_logic():
         handle_cd_drive_compatibility()
         
         cpu_cores = os.cpu_count() if os.cpu_count() is not None else 1
-        max_workers = min(cpu_cores, 8) 
+        # Use more threads for I/O-bound operations (reading DICOM files from disk)
+        max_workers = min(cpu_cores * 4, 32)  # 4x CPU cores, max 32 threads 
         logging.info(f"Using up to {max_workers} worker threads.")
         logging.info(f"7zip available: {'Yes' if SEVEN_ZIP_PATH else 'No'}")
         logging.info(f"Running as frozen executable: {'Yes' if getattr(sys, 'frozen', False) else 'No'}")
         
         app = QApplication.instance() or QApplication(sys.argv)
-        
+
+        # Apply Windows dark theme style
+        app.setStyle("Fusion")
+        dark_palette = """
+        QWidget {
+            background-color: #202020;
+            color: #ffffff;
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 9pt;
+        }
+        QLabel {
+            color: #ffffff;
+            background-color: transparent;
+        }
+        QPushButton {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border: 1px solid #3f3f3f;
+            padding: 5px 15px;
+            border-radius: 3px;
+        }
+        QPushButton:hover {
+            background-color: #3d3d3d;
+            border: 1px solid #5f5f5f;
+        }
+        QPushButton:pressed {
+            background-color: #1d1d1d;
+        }
+        QProgressBar {
+            border: 1px solid #3f3f3f;
+            border-radius: 3px;
+            text-align: center;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        QProgressBar::chunk {
+            background-color: #0078d4;
+            border-radius: 2px;
+        }
+        QCheckBox {
+            color: #ffffff;
+            spacing: 5px;
+        }
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+            border: 1px solid #3f3f3f;
+            border-radius: 3px;
+            background-color: #2d2d2d;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #0078d4;
+            border: 1px solid #0078d4;
+        }
+        QCheckBox::indicator:hover {
+            border: 1px solid #5f5f5f;
+        }
+        QDialog {
+            background-color: #202020;
+        }
+        QMessageBox {
+            background-color: #202020;
+        }
+        QLineEdit {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border: 1px solid #3f3f3f;
+            padding: 4px;
+            border-radius: 3px;
+        }
+        QLineEdit:focus {
+            border: 1px solid #0078d4;
+        }
+        """
+        app.setStyleSheet(dark_palette)
+
         if len(sys.argv) < 2:
             error_msg = "No input specified. Please drag and drop a directory or ZIP file onto this application, or run it from command line with a path argument."
             logging.error("Usage: script.py <path_to_directory_or_zip_file>")
@@ -1309,8 +1944,8 @@ def main_app_logic():
             
         progress_dialog = ProgressDialog("Processing DICOM Files")
         progress_dialog.show()
-        
-        processing_thread = ProcessingThread(validated_path, max_workers)
+
+        processing_thread = ProcessingThread(validated_path, max_workers, progress_dialog)
         
         def update_progress_slot(value, text):
             try:
@@ -1350,95 +1985,217 @@ def main_app_logic():
 
                 logging.debug("Patient data found. Beginning formatting.")
 
-                # Sort patients by ID (treat all as strings for consistency), then by name
-                def sort_patients(patient_data):
-                    try:
-                        pid = patient_data.get('patient_id') or 'ZZZZ'
-                        name = patient_data.get('patient_name', 'Unknown')
-                        
-                        # Convert all patient IDs to strings and pad numeric ones for proper sorting
-                        try:
-                            if pid and pid.isdigit():
-                                # Pad numeric IDs with leading zeros for proper string sorting
-                                pid_val = pid.zfill(10)  # Pad to 10 digits
-                            else:
-                                pid_val = str(pid) if pid else 'ZZZZ'
-                        except:
-                            pid_val = str(pid) if pid else 'ZZZZ'
-                            
-                        return (pid_val, name.lower())
-                    except Exception as e:
-                        logging.warning(f"Error sorting patient data: {e}")
-                        return ('ZZZZ', 'unknown')
-
-                sorted_patients = sorted(merged_patients.values(), key=sort_patients)
-                
-                lines = []
-                for patient in sorted_patients:
-                    try:
-                        pid = patient.get('patient_id', '')
-                        name = patient.get('patient_name', 'Unknown')
-                        dob = patient.get('patient_dob', 'Unknown')
-                        
-                        # Format patient header
-                        if pid:
-                            display_name = f"NAME: {name} DOB: {dob}, ID: {pid}"
-                        else:
-                            display_name = f"NAME: {name} DOB: {dob}, ID: Unknown"
-
-                        lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
-
-                        # Get studies dictionary
-                        studies_dict = patient.get('studies', {})
-                        logging.debug(f"Studies type: {type(studies_dict)}, count: {len(studies_dict)}")
-                        
-                        if isinstance(studies_dict, dict) and studies_dict:
-                            # Sort studies by date, then description
-                            sorted_studies = sorted(studies_dict.values(), 
-                                                key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
-                            
-                            for study in sorted_studies:
-                                study_date = study.get('study_date', 'Unknown')
-                                study_desc = study.get('study_description', 'Unknown')
-                                
-                                # Get all series in this study (regardless of modality)
-                                all_series = study.get('all_series', set())
-                                series_count = len(all_series)
-                                
-                                if series_count > 0:
-                                    # Format the line as: "DATE STUDY_DESCRIPTION (X series)"
-                                    line = f"{study_date} {study_desc} ({series_count} series)\r\n"
-                                    lines.append(line)
-                                else:
-                                    # Fallback if no series data
-                                    lines.append(f"{study_date} {study_desc}\r\n")
-
-                        lines.append("\r\n" + "="*50 + "\r\n\r\n")
-                    except Exception as e:
-                        logging.error(f"Error formatting patient data: {e}")
-                        continue
-
-                if not lines:
-                    show_error_popup("Unable to aggregate DICOM studies: No valid patient data could be formatted for output. Please manually inspect the source files.")
+                # Hide progress dialog and show output mode selection
+                progress_dialog.hide()
+                output_dialog = OutputModeDialog()
+                if output_dialog.exec_() != QDialog.Accepted:
+                    logging.info("User cancelled output mode selection")
                     progress_dialog.close()
                     app.quit()
                     return
 
-                # Copy to clipboard
-                output_text = "".join(lines)
-                logging.debug(f"Final output preview: {output_text[:500]}...")
-                
-                try:
-                    clipboard.copy(output_text)
+                to_clipboard, to_pdf = output_dialog.get_selection()
+                logging.info(f"Output mode selected - Clipboard: {to_clipboard}, PDF: {to_pdf}")
+
+                if not to_clipboard and not to_pdf:
+                    show_error_popup("Please select at least one output option (Clipboard or PDF)")
                     progress_dialog.close()
-                    show_success_popup("DICOM study information has been successfully copied to your clipboard and is ready to paste.")
                     app.quit()
-                except Exception as clipboard_error:
-                    progress_dialog.close()
-                    error_msg = handle_critical_error(clipboard_error, "clipboard operation")
-                    show_error_popup(f"Failed to copy results to clipboard: {error_msg}")
-                    app.quit()
-                    
+                    return
+
+                # Load settings
+                settings = load_settings()
+
+                # Generate text output for clipboard
+                output_text = None
+                if to_clipboard:
+                    # Sort patients by ID (treat all as strings for consistency), then by name
+                    def sort_patients(patient_data):
+                        try:
+                            pid = patient_data.get('patient_id') or 'ZZZZ'
+                            name = patient_data.get('patient_name', 'Unknown')
+
+                            # Convert all patient IDs to strings and pad numeric ones for proper sorting
+                            try:
+                                if pid and pid.isdigit():
+                                    pid_val = pid.zfill(10)
+                                else:
+                                    pid_val = str(pid) if pid else 'ZZZZ'
+                            except:
+                                pid_val = str(pid) if pid else 'ZZZZ'
+
+                            return (pid_val, name.lower())
+                        except Exception as e:
+                            logging.warning(f"Error sorting patient data: {e}")
+                            return ('ZZZZ', 'unknown')
+
+                    sorted_patients = sorted(merged_patients.values(), key=sort_patients)
+
+                    lines = []
+                    for patient in sorted_patients:
+                        try:
+                            pid = patient.get('patient_id', '')
+                            name = patient.get('patient_name', 'Unknown')
+                            dob = patient.get('patient_dob', 'Unknown')
+
+                            # Format patient header
+                            if pid:
+                                display_name = f"NAME: {name} DOB: {dob}, ID: {pid}"
+                            else:
+                                display_name = f"NAME: {name} DOB: {dob}, ID: Unknown"
+
+                            lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
+
+                            # Get studies dictionary
+                            studies_dict = patient.get('studies', {})
+                            logging.debug(f"Studies type: {type(studies_dict)}, count: {len(studies_dict)}")
+
+                            if isinstance(studies_dict, dict) and studies_dict:
+                                # Sort studies by date, then description
+                                sorted_studies = sorted(studies_dict.values(),
+                                                    key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
+
+                                for study in sorted_studies:
+                                    study_date = study.get('study_date', 'Unknown')
+                                    study_desc = study.get('study_description', 'Unknown')
+
+                                    # Get all series in this study (regardless of modality)
+                                    all_series = study.get('all_series', set())
+                                    series_count = len(all_series)
+
+                                    if series_count > 0:
+                                        line = f"{study_date} {study_desc} ({series_count} series)\r\n"
+                                        lines.append(line)
+                                    else:
+                                        lines.append(f"{study_date} {study_desc}\r\n")
+
+                            lines.append("\r\n" + "="*50 + "\r\n\r\n")
+                        except Exception as e:
+                            logging.error(f"Error formatting patient data: {e}")
+                            continue
+
+                    if not lines:
+                        show_error_popup("Unable to aggregate DICOM studies: No valid patient data could be formatted for output. Please manually inspect the source files.")
+                        progress_dialog.close()
+                        app.quit()
+                        return
+
+                    output_text = "".join(lines)
+                    logging.debug(f"Final output preview: {output_text[:500]}...")
+
+                # Handle PDF output
+                pdf_path = None
+                if to_pdf:
+                    logging.info("=== PDF GENERATION STARTED ===")
+                    try:
+                        # Get save directory from settings
+                        default_dir = settings.get('last_save_directory', str(Path.home() / "Desktop"))
+                        logging.info(f"Default directory from settings: {default_dir}")
+
+                        # Verify directory exists, fallback to desktop if not
+                        if not os.path.exists(default_dir):
+                            default_dir = str(Path.home() / "Desktop")
+                            logging.warning(f"Saved directory doesn't exist, using desktop: {default_dir}")
+                        else:
+                            logging.info(f"Default directory exists: {default_dir}")
+
+                        # Show file save dialog
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        default_filename = f"DICOM_Report_{timestamp}.pdf"
+                        default_path = os.path.join(default_dir, default_filename)
+                        logging.info(f"Default save path: {default_path}")
+
+                        # Use static method for better compatibility
+                        logging.info("Creating file save dialog...")
+                        logging.info(f"Default dir: {default_dir}, Default filename: {default_filename}")
+
+                        # Show progress dialog to ensure we have a parent window
+                        progress_dialog.show()
+                        progress_dialog.raise_()
+                        progress_dialog.activateWindow()
+
+                        file_path, selected_filter = QFileDialog.getSaveFileName(
+                            progress_dialog,
+                            "Save DICOM Report",
+                            os.path.join(default_dir, default_filename),
+                            "PDF Files (*.pdf);;All Files (*.*)",
+                            options=QFileDialog.DontUseNativeDialog
+                        )
+
+                        logging.info(f"File dialog returned. File path: '{file_path}', Filter: {selected_filter}")
+
+                        # getSaveFileName returns empty string if cancelled
+                        if not file_path:
+                            logging.info("User cancelled file save dialog")
+                            file_path = None
+                        else:
+                            logging.info(f"User selected file path: {file_path}")
+
+                        if file_path:
+                            logging.info(f"Processing file path: {file_path}")
+                            # Save the directory for next time
+                            save_dir = os.path.dirname(file_path)
+                            logging.info(f"Saving directory to settings: {save_dir}")
+                            settings['last_save_directory'] = save_dir
+                            save_settings(settings)
+
+                            # Generate Markdown report
+                            logging.info("Generating Markdown report...")
+                            markdown_content = generate_markdown_report(merged_patients, settings)
+                            if markdown_content:
+                                logging.info(f"Markdown generated successfully, length: {len(markdown_content)} characters")
+                                # Save as PDF/HTML
+                                logging.info(f"Calling save_markdown_as_pdf with path: {file_path}")
+                                pdf_path = save_markdown_as_pdf(markdown_content, file_path)
+                                logging.info(f"save_markdown_as_pdf returned: {pdf_path}")
+                                if pdf_path:
+                                    logging.info(f"Report saved successfully to: {pdf_path}")
+                                else:
+                                    logging.error("save_markdown_as_pdf returned None")
+                            else:
+                                logging.error("Failed to generate Markdown report - markdown_content is None or empty")
+                                show_error_popup("Failed to generate PDF report")
+                        else:
+                            logging.info("No file path - user cancelled file save dialog")
+                            if not to_clipboard:
+                                # If only PDF was selected and user cancelled, quit
+                                logging.info("Only PDF was selected and user cancelled, quitting")
+                                progress_dialog.close()
+                                app.quit()
+                                return
+                            else:
+                                logging.info("Clipboard also selected, continuing without PDF")
+
+                    except Exception as pdf_error:
+                        logging.error(f"Exception in PDF generation: {pdf_error}", exc_info=True)
+                        show_error_popup(f"Error saving PDF: {str(pdf_error)}")
+                    finally:
+                        logging.info("=== PDF GENERATION ENDED ===")
+
+                # Copy to clipboard if selected
+                if to_clipboard and output_text:
+                    try:
+                        clipboard.copy(output_text)
+                        logging.info("Results copied to clipboard")
+                    except Exception as clipboard_error:
+                        logging.error(f"Failed to copy to clipboard: {clipboard_error}")
+                        show_error_popup(f"Failed to copy results to clipboard: {str(clipboard_error)}")
+
+                # Show success message
+                progress_dialog.close()
+                success_messages = []
+                if to_clipboard and output_text:
+                    success_messages.append("copied to clipboard")
+                if pdf_path:
+                    file_type = "PDF" if pdf_path.endswith('.pdf') else "HTML"
+                    success_messages.append(f"saved as {file_type}")
+
+                if success_messages:
+                    msg = f"DICOM study information has been successfully {' and '.join(success_messages)}!"
+                    show_success_popup(msg)
+
+                app.quit()
+
             except Exception as e_format:
                 error_msg = handle_critical_error(e_format, "result formatting")
                 logging.error(f"Error in on_finished_slot: {e_format}", exc_info=True)
@@ -1470,11 +2227,10 @@ def main_app_logic():
 
 def profile_main():
     start_time = time.time()
-    
+
     try:
         setup_logging()
-        logging.info("Python garbage collection is currently disabled for the main application logic.")
-        logging.warning("Garbage collection is disabled. This may increase peak memory usage but can speed up processing for this utility.")
+        logging.info("Using strategic garbage collection for optimized performance.")
         exit_code = main_app_logic()
         total_duration = time.time() - start_time
         logging.info(f"Total execution time: {total_duration:.2f} seconds")
@@ -1493,10 +2249,7 @@ if __name__ == "__main__":
         if sys.platform.startswith('win'):
             import multiprocessing
             multiprocessing.freeze_support()
-        gc.disable()
         final_exit_code = profile_main()
-        gc.enable()
-        logging.info("Python garbage collection re-enabled.")
         logging.info("Application finished.")
         sys.exit(final_exit_code)
     except Exception as e:
