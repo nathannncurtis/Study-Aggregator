@@ -2,22 +2,34 @@ import sys
 import os
 
 if getattr(sys, 'frozen', False):
+    # Add lib directory to path for frozen executable
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller
+        lib_path = os.path.join(sys._MEIPASS, 'lib')
+    else:
+        # cx_Freeze
+        lib_path = os.path.join(os.path.dirname(sys.executable), 'lib')
+
+    if os.path.exists(lib_path) and lib_path not in sys.path:
+        sys.path.insert(0, lib_path)
+        print(f"Added lib path to sys.path: {lib_path}")
+
     # Create minimal mocks only for the most problematic modules
     import types
-    
+
     # Mock only the data-related modules that cause file access issues
     problematic_modules = [
-        'pydicom.data.data_manager', 
+        'pydicom.data.data_manager',
         'pydicom.data.download',
         'pydicom.examples'
     ]
-    
+
     for module_name in problematic_modules:
         if module_name not in sys.modules:
             mock_module = types.ModuleType(module_name)
             mock_module.__file__ = '<frozen>'
             mock_module.__path__ = []
-            
+
             # Add specific functions that might be called
             if 'data_manager' in module_name:
                 mock_module.get_testdata_file = lambda *args, **kwargs: None
@@ -31,9 +43,9 @@ if getattr(sys, 'frozen', False):
                 # Mock common example file attributes
                 for attr in ['ct', 'mr', 'rtplan', 'rtdose', 'rtstruct']:
                     setattr(mock_module, attr, None)
-            
+
             sys.modules[module_name] = mock_module
-    
+
     # Also create a basic pydicom.data module to satisfy imports
     if 'pydicom.data' not in sys.modules:
         data_module = types.ModuleType('pydicom.data')
@@ -67,17 +79,8 @@ import subprocess
 import re
 import json
 from pathlib import Path
-try:
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
-    logging.warning("ReportLab not available. PDF generation will be limited.")
+from PyQt5.QtPrintSupport import QPrinter
+from PyQt5.QtGui import QTextDocument, QFont, QTextCursor, QTextTableFormat, QTextCharFormat
 
 # --- Enhanced Logging Setup ---
 def setup_logging():
@@ -528,160 +531,151 @@ def generate_markdown_report(patients_data, settings):
         logging.error(f"Error generating Markdown report: {e}", exc_info=True)
         return None
 
-def markdown_to_html_with_styling(markdown_content):
-    """Convert Markdown to styled HTML"""
-    # Simple markdown to HTML converter (basic implementation)
-    html_parts = []
-
-    # Add HTML header with styling
-    html_parts.append("""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>DICOM Study Report</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 40px;
-            line-height: 1.6;
-        }
-        h1 {
-            color: #333;
-            border-bottom: 3px solid #4CAF50;
-            padding-bottom: 10px;
-            text-align: center;
-        }
-        h2 {
-            color: white;
-            background-color: #4CAF50;
-            padding: 10px;
-            border-radius: 5px;
-            margin-top: 30px;
-        }
-        h3 {
-            color: white;
-            background-color: #2196F3;
-            padding: 8px;
-            border-radius: 3px;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 12px 8px;
-            text-align: left;
-        }
-        th {
-            background-color: #f2f2f2;
-            font-weight: bold;
-        }
-        tr:nth-child(even) {
-            background-color: #f9f9f9;
-        }
-        hr {
-            border: none;
-            border-top: 2px solid #333;
-            margin: 30px 0;
-        }
-        strong {
-            color: #333;
-        }
-        p {
-            margin: 10px 0;
-        }
-    </style>
-</head>
-<body>
-""")
-
-    # Process markdown line by line
-    lines = markdown_content.split('\n')
-    in_table = False
-    table_header_processed = False
-
-    for i, line in enumerate(lines):
-        # Headers
-        if line.startswith('# '):
-            html_parts.append(f'<h1>{line[2:]}</h1>\n')
-        elif line.startswith('## '):
-            html_parts.append(f'<h2>{line[3:]}</h2>\n')
-        elif line.startswith('### '):
-            html_parts.append(f'<h3>{line[4:]}</h3>\n')
-        # Horizontal rule
-        elif line.strip() == '---':
-            html_parts.append('<hr>\n')
-        # Table
-        elif line.startswith('|'):
-            if not in_table:
-                html_parts.append('<table>\n')
-                in_table = True
-                table_header_processed = False
-
-            # Skip separator line
-            if '---' in line:
-                table_header_processed = True
-                continue
-
-            # Process table row
-            cells = [cell.strip() for cell in line.split('|')[1:-1]]  # Remove empty first and last
-            if not table_header_processed:
-                html_parts.append('<tr>')
-                for cell in cells:
-                    # Process bold
-                    cell = cell.replace('**', '<strong>').replace('**', '</strong>')
-                    html_parts.append(f'<th>{cell}</th>')
-                html_parts.append('</tr>\n')
-            else:
-                html_parts.append('<tr>')
-                for cell in cells:
-                    # Process bold
-                    cell = cell.replace('**', '<strong>').replace('**', '</strong>')
-                    html_parts.append(f'<td>{cell}</td>')
-                html_parts.append('</tr>\n')
-        else:
-            # Close table if we were in one
-            if in_table and not line.startswith('|'):
-                html_parts.append('</table>\n')
-                in_table = False
-                table_header_processed = False
-
-            # Regular paragraph
-            if line.strip():
-                # Process bold
-                processed_line = line
-                # Simple bold replacement (handles **text**)
-                while '**' in processed_line:
-                    processed_line = processed_line.replace('**', '<strong>', 1)
-                    processed_line = processed_line.replace('**', '</strong>', 1)
-                html_parts.append(f'<p>{processed_line}</p>\n')
-            else:
-                html_parts.append('\n')
-
-    # Close table if still open
-    if in_table:
-        html_parts.append('</table>\n')
-
-    html_parts.append('</body>\n</html>')
-
-    return ''.join(html_parts)
-
 def save_markdown_as_pdf(markdown_content, save_path):
-    """Save Markdown content as PDF using ReportLab - simple black and white format"""
+    """Save Markdown content as PDF using PyQt5's QPrinter - simple black and white format"""
     try:
         logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
         logging.info(f"Input save_path: {save_path}")
         logging.info(f"Markdown content length: {len(markdown_content)}")
-        logging.info(f"ReportLab available: {REPORTLAB_AVAILABLE}")
 
         # Ensure save_path has .pdf extension
         if not save_path.lower().endswith('.pdf'):
             save_path = save_path + '.pdf'
 
-        # Save as PDF using ReportLab if available
-        if REPORTLAB_AVAILABLE:
+        # Use PyQt5's QPrinter to generate PDF - no external dependencies needed!
+        logging.info(f"Converting Markdown to PDF using PyQt5 QPrinter...")
+
+        # Create a QPrinter for PDF output
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(save_path)
+        printer.setPageMargins(40, 40, 40, 40, QPrinter.Point)
+
+        # Create QTextDocument and set content
+        document = QTextDocument()
+        cursor = QTextCursor(document)
+
+        # Set default font
+        default_font = QFont("Arial", 10)
+        document.setDefaultFont(default_font)
+
+        # Title format
+        title_format = QTextCharFormat()
+        title_format.setFont(QFont("Arial", 16, QFont.Bold))
+
+        # Heading format
+        heading_format = QTextCharFormat()
+        heading_format.setFont(QFont("Arial", 11, QFont.Bold))
+
+        # Normal format
+        normal_format = QTextCharFormat()
+        normal_format.setFont(default_font)
+
+        # Add title
+        cursor.setCharFormat(title_format)
+        cursor.insertText("X-RAY BREAKDOWN\n\n")
+        cursor.setCharFormat(normal_format)
+
+        # Parse markdown content
+        lines = markdown_content.split('\n')
+
+        # Extract and add facility info
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if 'Facility Information' in line:
+                i += 1
+                while i < len(lines) and lines[i].strip() != '---':
+                    line = lines[i].strip()
+                    if line.startswith('**'):
+                        clean_line = line.replace('**', '')
+                        cursor.insertText(clean_line + "\n")
+                    i += 1
+                cursor.insertText("\n")
+                break
+            i += 1
+
+        # Parse patient data and studies
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Patient header
+            if line.startswith('## NAME:'):
+                cursor.setCharFormat(heading_format)
+                cursor.insertText(line[3:] + "\n")  # Remove ##
+                cursor.setCharFormat(normal_format)
+
+            # Studies table
+            elif line.startswith('|') and 'Date' in line:
+                # Collect table rows
+                table_rows = []
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    row_line = lines[i].strip()
+                    if '---' not in row_line:
+                        cells = [cell.strip() for cell in row_line.split('|')[1:-1]]
+                        table_rows.append(cells)
+                    i += 1
+                i -= 1
+
+                if table_rows and len(table_rows) > 0:
+                    # Create table
+                    num_cols = len(table_rows[0])
+                    num_rows = len(table_rows)
+
+                    table_format = QTextTableFormat()
+                    table_format.setBorder(1)
+                    table_format.setCellPadding(5)
+                    table_format.setCellSpacing(0)
+                    table_format.setAlignment(Qt.AlignLeft)
+
+                    table = cursor.insertTable(num_rows, num_cols, table_format)
+
+                    # Fill table
+                    for row_idx, row_data in enumerate(table_rows):
+                        for col_idx, cell_data in enumerate(row_data):
+                            cell = table.cellAt(row_idx, col_idx)
+                            cell_cursor = cell.firstCursorPosition()
+                            if row_idx == 0:
+                                # Header row - bold
+                                cell_cursor.setCharFormat(heading_format)
+                            cell_cursor.insertText(cell_data)
+
+                    cursor.movePosition(QTextCursor.End)
+                    cursor.insertText("\n")
+
+            i += 1
+
+        # Print document to PDF
+        document.print_(printer)
+
+        # Verify file was created
+        if os.path.exists(save_path):
+            file_size = os.path.getsize(save_path)
+            logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
+            return save_path
+        else:
+            logging.error(f"PDF file was NOT created at {save_path}")
+            raise Exception(f"PDF file was not created at {save_path}")
+
+    except Exception as e:
+        logging.error(f"Error saving PDF report: {e}", exc_info=True)
+        return None
+
+
+def save_markdown_as_pdf_OLD_REPORTLAB_VERSION(markdown_content, save_path):
+    """OLD VERSION - Save Markdown content as PDF using ReportLab - simple black and white format"""
+    try:
+        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
+        logging.info(f"Input save_path: {save_path}")
+        logging.info(f"Markdown content length: {len(markdown_content)}")
+
+        # Ensure save_path has .pdf extension
+        if not save_path.lower().endswith('.pdf'):
+            save_path = save_path + '.pdf'
+
+        # This version requires ReportLab - NOT USED ANYMORE
+        if False:
             try:
                 logging.info(f"Converting Markdown to PDF using ReportLab...")
 
@@ -811,40 +805,16 @@ def save_markdown_as_pdf(markdown_content, save_path):
                     return save_path
                 else:
                     logging.error(f"PDF file was NOT created at {save_path}")
-                    # Fallback to HTML
-                    html_path = save_path.replace('.pdf', '.html')
-                    html_content = markdown_to_html_with_styling(markdown_content)
-                    with open(html_path, 'w', encoding='utf-8') as f:
-                        f.write(html_content)
-                    logging.info(f"Saved HTML fallback to {html_path}")
-                    return html_path
+                    raise Exception(f"PDF file was not created at {save_path}")
 
             except Exception as pdf_error:
                 logging.error(f"ReportLab PDF generation failed: {pdf_error}", exc_info=True)
-                # Fallback to HTML
-                html_path = save_path.replace('.pdf', '.html')
-                html_content = markdown_to_html_with_styling(markdown_content)
-                with open(html_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                logging.info(f"PDF generation failed, saved HTML instead to {html_path}")
-                return html_path
+                raise Exception(f"PDF generation failed: {pdf_error}")
         else:
-            # ReportLab not available, save as HTML
-            html_path = save_path.replace('.pdf', '.html')
-            logging.warning("ReportLab not available, saving as HTML instead")
-
-            html_content = markdown_to_html_with_styling(markdown_content)
-            with open(html_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-
-            if os.path.exists(html_path):
-                file_size = os.path.getsize(html_path)
-                logging.info(f"HTML report saved to {html_path}, size: {file_size} bytes")
-                logging.info("To enable PDF generation, install ReportLab: pip install reportlab")
-                return html_path
-            else:
-                logging.error(f"File was NOT created at {html_path}")
-                return None
+            # ReportLab not available - this should never happen
+            error_msg = "CRITICAL ERROR: ReportLab is not available. Cannot generate PDF."
+            logging.error(error_msg)
+            raise ImportError(error_msg)
 
     except Exception as e:
         logging.error(f"Error saving report: {e}", exc_info=True)
