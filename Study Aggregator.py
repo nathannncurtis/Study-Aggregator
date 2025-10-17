@@ -81,6 +81,10 @@ import json
 from pathlib import Path
 from PyQt5.QtPrintSupport import QPrinter
 from PyQt5.QtGui import QTextDocument, QFont, QTextCursor, QTextTableFormat, QTextCharFormat
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+import io
 
 # --- Enhanced Logging Setup ---
 def setup_logging():
@@ -531,123 +535,68 @@ def generate_markdown_report(patients_data, settings):
         logging.error(f"Error generating Markdown report: {e}", exc_info=True)
         return None
 
-def save_markdown_as_pdf(markdown_content, save_path):
-    """Save Markdown content as PDF using PyQt5's QPrinter - simple black and white format"""
+def save_patient_data_as_pdf(merged_patients, settings, save_path):
+    """Generate PDF directly from patient data using bd.pdf template"""
     try:
-        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
+        logging.info(f"=== SAVE_PATIENT_DATA_AS_PDF CALLED ===")
         logging.info(f"Input save_path: {save_path}")
-        logging.info(f"Markdown content length: {len(markdown_content)}")
+        logging.info(f"Number of patients: {len(merged_patients)}")
 
         # Ensure save_path has .pdf extension
         if not save_path.lower().endswith('.pdf'):
             save_path = save_path + '.pdf'
 
-        # Use PyQt5's QPrinter to generate PDF - no external dependencies needed!
-        logging.info(f"Converting Markdown to PDF using PyQt5 QPrinter...")
+        # Find bd.pdf template
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
 
-        # Create a QPrinter for PDF output
-        printer = QPrinter(QPrinter.HighResolution)
-        printer.setOutputFormat(QPrinter.PdfFormat)
-        printer.setOutputFileName(save_path)
-        printer.setPageMargins(40, 40, 40, 40, QPrinter.Point)
+        template_path = os.path.join(base_path, 'bd.pdf')
 
-        # Create QTextDocument and set content
-        document = QTextDocument()
-        cursor = QTextCursor(document)
+        if not os.path.exists(template_path):
+            logging.error(f"Template bd.pdf not found at {template_path}")
+            raise FileNotFoundError(f"Template bd.pdf not found at {template_path}")
 
-        # Set default font
-        default_font = QFont("Arial", 10)
-        document.setDefaultFont(default_font)
+        # Extract patient name and studies directly from merged_patients
+        patient_name = ""
+        studies = []
 
-        # Title format
-        title_format = QTextCharFormat()
-        title_format.setFont(QFont("Arial", 16, QFont.Bold))
+        # Get first patient
+        for patient_key, patient_data in merged_patients.items():
+            patient_name = patient_data.get('name', '')
 
-        # Heading format
-        heading_format = QTextCharFormat()
-        heading_format.setFont(QFont("Arial", 11, QFont.Bold))
+            # Convert patient name to sentence case (capitalize first letter of each word)
+            if patient_name:
+                patient_name = patient_name.title()
 
-        # Normal format
-        normal_format = QTextCharFormat()
-        normal_format.setFont(default_font)
+            # Extract all studies (studies is a dict with study_uid as keys)
+            studies_dict = patient_data.get('studies', {})
+            for study_uid, study_data in studies_dict.items():
+                study_date = study_data.get('study_date', 'Unknown')
+                study_desc = study_data.get('study_description', 'Unknown Study')
+                series_count = len(study_data.get('all_series', set()))
 
-        # Add title
-        cursor.setCharFormat(title_format)
-        cursor.insertText("X-RAY BREAKDOWN\n\n")
-        cursor.setCharFormat(normal_format)
+                # Convert date format from MM-DD-YYYY to MM/DD/YYYY
+                if study_date and study_date != 'Unknown':
+                    study_date = study_date.replace('-', '/')
 
-        # Parse markdown content
-        lines = markdown_content.split('\n')
+                # Convert study description to sentence case
+                if study_desc:
+                    study_desc = study_desc.title()
 
-        # Extract and add facility info
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if 'Facility Information' in line:
-                i += 1
-                while i < len(lines) and lines[i].strip() != '---':
-                    line = lines[i].strip()
-                    if line.startswith('**'):
-                        clean_line = line.replace('**', '')
-                        cursor.insertText(clean_line + "\n")
-                    i += 1
-                cursor.insertText("\n")
-                break
-            i += 1
+                # Format: MM/DD/YYYY, Description, US (Count series)
+                study_line = f"{study_date}, {study_desc}, US ({series_count} series)"
+                studies.append(study_line)
 
-        # Parse patient data and studies
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
+            # Only process first patient
+            break
 
-            # Patient header
-            if line.startswith('## NAME:'):
-                cursor.setCharFormat(heading_format)
-                cursor.insertText(line[3:] + "\n")  # Remove ##
-                cursor.setCharFormat(normal_format)
+        logging.info(f"Extracted patient name: {patient_name}")
+        logging.info(f"Extracted {len(studies)} studies")
 
-            # Studies table
-            elif line.startswith('|') and 'Date' in line:
-                # Collect table rows
-                table_rows = []
-                while i < len(lines) and lines[i].strip().startswith('|'):
-                    row_line = lines[i].strip()
-                    if '---' not in row_line:
-                        cells = [cell.strip() for cell in row_line.split('|')[1:-1]]
-                        table_rows.append(cells)
-                    i += 1
-                i -= 1
-
-                if table_rows and len(table_rows) > 0:
-                    # Create table
-                    num_cols = len(table_rows[0])
-                    num_rows = len(table_rows)
-
-                    table_format = QTextTableFormat()
-                    table_format.setBorder(1)
-                    table_format.setCellPadding(5)
-                    table_format.setCellSpacing(0)
-                    table_format.setAlignment(Qt.AlignLeft)
-
-                    table = cursor.insertTable(num_rows, num_cols, table_format)
-
-                    # Fill table
-                    for row_idx, row_data in enumerate(table_rows):
-                        for col_idx, cell_data in enumerate(row_data):
-                            cell = table.cellAt(row_idx, col_idx)
-                            cell_cursor = cell.firstCursorPosition()
-                            if row_idx == 0:
-                                # Header row - bold
-                                cell_cursor.setCharFormat(heading_format)
-                            cell_cursor.insertText(cell_data)
-
-                    cursor.movePosition(QTextCursor.End)
-                    cursor.insertText("\n")
-
-            i += 1
-
-        # Print document to PDF
-        document.print_(printer)
+        # Generate PDF with template (location left blank)
+        _create_pdf_from_template(template_path, save_path, patient_name, "", studies)
 
         # Verify file was created
         if os.path.exists(save_path):
@@ -661,6 +610,269 @@ def save_markdown_as_pdf(markdown_content, save_path):
     except Exception as e:
         logging.error(f"Error saving PDF report: {e}", exc_info=True)
         return None
+
+
+def save_markdown_as_pdf(markdown_content, save_path):
+    """Generate PDF using bd.pdf template with overlaid study information"""
+    try:
+        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
+        logging.info(f"Input save_path: {save_path}")
+        logging.info(f"Markdown content length: {len(markdown_content)}")
+
+        # Ensure save_path has .pdf extension
+        if not save_path.lower().endswith('.pdf'):
+            save_path = save_path + '.pdf'
+
+        # Find bd.pdf template
+        if getattr(sys, 'frozen', False):
+            # Running as frozen executable
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # Running as script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+
+        template_path = os.path.join(base_path, 'bd.pdf')
+
+        if not os.path.exists(template_path):
+            logging.error(f"Template bd.pdf not found at {template_path}")
+            raise FileNotFoundError(f"Template bd.pdf not found at {template_path}")
+
+        # Parse markdown to extract patient and study data
+        lines = markdown_content.split('\n')
+
+        logging.info(f"Markdown content:\n{markdown_content}")
+        logging.info(f"Total lines in markdown: {len(lines)}")
+
+        # Extract patient name from first patient header
+        patient_name = ""
+        for line in lines:
+            if line.startswith('## NAME:'):
+                # Extract name from format: ## NAME: John Doe | DOB: ... | ID: ...
+                parts = line[3:].split('|')
+                if parts:
+                    patient_name = parts[0].replace('NAME:', '').strip()
+                    break
+
+        # Extract facility location
+        location = ""
+        for line in lines:
+            if 'Facility' in line or 'facility' in line:
+                # Try to extract facility name
+                if '**' in line:
+                    clean = line.replace('**', '').strip()
+                    if 'Facility' in clean:
+                        location = clean.replace('Facility Information:', '').replace('Facility:', '').strip()
+                        break
+
+        # Extract all studies with format: Date, Description, Modality (Count)
+        studies = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Find study tables
+            if line.startswith('|') and 'Date' in line:
+                i += 1
+                # Skip separator line
+                if i < len(lines) and '---' in lines[i]:
+                    i += 1
+                # Collect study rows
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    row = lines[i].strip()
+                    cells = [cell.strip() for cell in row.split('|')[1:-1]]
+                    if len(cells) >= 4:  # Date, Description, Modality, Count
+                        # Format: MM/DD/YYYY, Description, Modality (Count)
+                        study_line = f"{cells[0]}, {cells[1]}, {cells[2]} ({cells[3]})"
+                        studies.append(study_line)
+                    i += 1
+                i -= 1
+            i += 1
+
+        logging.info(f"Extracted patient: {patient_name}")
+        logging.info(f"Extracted location: {location}")
+        logging.info(f"Extracted {len(studies)} studies")
+
+        # Generate PDF with template overlay
+        _create_pdf_from_template(template_path, save_path, patient_name, location, studies)
+
+        # Verify file was created
+        if os.path.exists(save_path):
+            file_size = os.path.getsize(save_path)
+            logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
+            return save_path
+        else:
+            logging.error(f"PDF file was NOT created at {save_path}")
+            raise Exception(f"PDF file was not created at {save_path}")
+
+    except Exception as e:
+        logging.error(f"Error saving PDF report: {e}", exc_info=True)
+        return None
+
+
+def _create_pdf_from_template(template_path, output_path, patient_name, location, studies):
+    """Create PDF by filling form fields or adding text to bd.pdf template"""
+    try:
+        # Read the template
+        template_reader = PdfReader(template_path)
+
+        # Check if PDF has form fields
+        if template_reader.get_form_text_fields():
+            logging.info("PDF has form fields - using form filling method")
+            fields = template_reader.get_form_text_fields()
+            logging.info(f"Available form fields: {list(fields.keys())}")
+            # Use form filling
+            _fill_pdf_form_fields(template_path, output_path, patient_name, location, studies)
+        else:
+            logging.info("PDF has no form fields - using text overlay method")
+            # No form fields, use overlay method
+            _fill_pdf_with_overlay(template_path, output_path, patient_name, location, studies)
+
+    except Exception as e:
+        logging.error(f"Error creating PDF from template: {e}", exc_info=True)
+        raise
+
+
+def _fill_pdf_form_fields(template_path, output_path, patient_name, location, studies):
+    """Fill PDF form fields directly - creates separate PDFs and combines them"""
+    try:
+        import tempfile
+
+        # 30 studies per page as requested
+        studies_per_page = 30
+        total_pages = max(1, (len(studies) + studies_per_page - 1) // studies_per_page)
+
+        logging.info(f"Patient name: {patient_name}")
+        logging.info(f"Location: {location}")
+        logging.info(f"Number of studies: {len(studies)}")
+        logging.info(f"Total pages needed: {total_pages}")
+
+        # Create separate PDF for each page, then combine
+        temp_files = []
+
+        for page_num in range(total_pages):
+            # Get studies for this page
+            start_idx = page_num * studies_per_page
+            end_idx = min(start_idx + studies_per_page, len(studies))
+            page_studies = studies[start_idx:end_idx]
+
+            # Build the studies text for this page
+            studies_text = "\n".join(page_studies)
+
+            logging.info(f"Page {page_num + 1}: Studies {start_idx + 1}-{end_idx} ({len(page_studies)} studies)")
+
+            # Create a new reader and writer for this page
+            template_reader = PdfReader(template_path)
+            page_writer = PdfWriter()
+            page_writer.clone_document_from_reader(template_reader)
+
+            # Fill form fields
+            field_values = {
+                "Regarding": patient_name if patient_name else "",
+                "Location": location if location else "",
+                "WO#": "",  # Leave blank
+                "Page": str(page_num + 1),
+                "Of": str(total_pages),
+                "List of Studies": studies_text
+            }
+
+            page_writer.update_page_form_field_values(
+                page_writer.pages[0],
+                field_values
+            )
+
+            # Write to temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            temp_files.append(temp_file.name)
+            page_writer.write(temp_file)
+            temp_file.close()
+
+        # Now combine all temp PDFs into final output
+        final_writer = PdfWriter()
+        for temp_path in temp_files:
+            reader = PdfReader(temp_path)
+            final_writer.add_page(reader.pages[0])
+
+        # Write final output
+        with open(output_path, 'wb') as output_file:
+            final_writer.write(output_file)
+
+        # Clean up temp files
+        for temp_path in temp_files:
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+        logging.info(f"Created PDF with form fields filled - {total_pages} page(s)")
+
+    except Exception as e:
+        logging.error(f"Error filling PDF form fields: {e}", exc_info=True)
+        raise
+
+
+def _fill_pdf_with_overlay(template_path, output_path, patient_name, location, studies):
+    """Add text overlay to PDF (for PDFs without form fields)"""
+    try:
+        # Estimate studies per page
+        studies_per_page = 25
+        total_pages = max(1, (len(studies) + studies_per_page - 1) // studies_per_page)
+
+        pdf_writer = PdfWriter()
+
+        for page_num in range(total_pages):
+            # Get studies for this page
+            start_idx = page_num * studies_per_page
+            end_idx = min(start_idx + studies_per_page, len(studies))
+            page_studies = studies[start_idx:end_idx]
+
+            # Create overlay with ReportLab
+            packet = io.BytesIO()
+            can = canvas.Canvas(packet, pagesize=letter)
+
+            # Regarding field - approximately at y=535 from bottom
+            if patient_name and page_num == 0:
+                can.drawString(200, 535, patient_name)
+
+            # Location field - approximately at y=510 from bottom
+            if location and page_num == 0:
+                can.drawString(200, 510, location)
+
+            # Studies list starts at approximately y=430 from bottom
+            y_position = 430
+            line_height = 14
+
+            for study in page_studies:
+                can.drawString(80, y_position, study)
+                y_position -= line_height
+                if y_position < 100:
+                    break
+
+            # Page number at bottom
+            page_text = f"Page {page_num + 1} of {total_pages}"
+            can.drawString(280, 50, page_text)
+
+            can.save()
+            packet.seek(0)
+
+            # Read template and overlay
+            template_reader = PdfReader(template_path)
+            template_page = template_reader.pages[0]
+
+            # Merge overlay
+            overlay_reader = PdfReader(packet)
+            overlay_page = overlay_reader.pages[0]
+            template_page.merge_page(overlay_page)
+
+            pdf_writer.add_page(template_page)
+
+        # Write output
+        with open(output_path, 'wb') as output_file:
+            pdf_writer.write(output_file)
+
+        logging.info(f"Created PDF with text overlay - {total_pages} page(s)")
+
+    except Exception as e:
+        logging.error(f"Error creating PDF overlay: {e}", exc_info=True)
+        raise
 
 
 def save_markdown_as_pdf_OLD_REPORTLAB_VERSION(markdown_content, save_path):
@@ -2109,21 +2321,14 @@ def main_app_logic():
                             settings['last_save_directory'] = save_dir
                             save_settings(settings)
 
-                            # Generate Markdown report
-                            logging.info("Generating Markdown report...")
-                            markdown_content = generate_markdown_report(merged_patients, settings)
-                            if markdown_content:
-                                logging.info(f"Markdown generated successfully, length: {len(markdown_content)} characters")
-                                # Save as PDF/HTML
-                                logging.info(f"Calling save_markdown_as_pdf with path: {file_path}")
-                                pdf_path = save_markdown_as_pdf(markdown_content, file_path)
-                                logging.info(f"save_markdown_as_pdf returned: {pdf_path}")
-                                if pdf_path:
-                                    logging.info(f"Report saved successfully to: {pdf_path}")
-                                else:
-                                    logging.error("save_markdown_as_pdf returned None")
+                            # Generate PDF directly from patient data
+                            logging.info("Generating PDF report...")
+                            pdf_path = save_patient_data_as_pdf(merged_patients, settings, file_path)
+                            logging.info(f"save_patient_data_as_pdf returned: {pdf_path}")
+                            if pdf_path:
+                                logging.info(f"Report saved successfully to: {pdf_path}")
                             else:
-                                logging.error("Failed to generate Markdown report - markdown_content is None or empty")
+                                logging.error("save_patient_data_as_pdf returned None")
                                 show_error_popup("Failed to generate PDF report")
                         else:
                             logging.info("No file path - user cancelled file save dialog")
