@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Study Aggregator"
-#define MyAppVersion "2.5.2"
+#define MyAppVersion "2.5.3"
 #define MyAppPublisher "Nathan Curtis"
 #define MyAppURL "https://github.com/nathannncurtis/study-aggregator"
 #define MyAppExeName "Study Aggregator.exe"

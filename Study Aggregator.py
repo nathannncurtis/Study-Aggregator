@@ -77,9 +77,6 @@ import subprocess
 import json
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-import io
 
 # --- Enhanced Logging Setup ---
 def setup_logging():

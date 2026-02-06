@@ -38,7 +38,7 @@ build_exe_options = {
         "PyQt5.QtWidgets", "PyQt5.QtCore", "PyQt5.QtGui", "PyQt5.QtPrintSupport",
 
         # PDF manipulation
-        "pypdf", "reportlab", "reportlab.pdfgen", "reportlab.lib", "reportlab.lib.pagesizes",
+        "pypdf",
 
         # Utilities
         "clipboard", "ctypes",

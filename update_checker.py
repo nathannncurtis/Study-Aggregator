@@ -3,6 +3,7 @@ import os
 import json
 import tempfile
 import subprocess
+import threading
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 import ctypes
@@ -23,6 +24,15 @@ def get_current_version():
 
 CURRENT_VERSION = get_current_version()
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+# Win32 constants
+MB_OK = 0x0
+MB_YESNO = 0x04
+MB_ICONINFORMATION = 0x40
+MB_TOPMOST = 0x40000
+MB_SETFOREGROUND = 0x10000
+MB_FLAGS = MB_TOPMOST | MB_SETFOREGROUND
+WM_CLOSE = 0x0010
 
 
 def parse_version(version_str):
@@ -61,17 +71,28 @@ def check_for_update():
         return None
 
 
-def message_box(title, message, style=0x40):
-    """Show a Windows message box. Returns button ID."""
-    # 0x40 = MB_ICONINFORMATION, 0x44 = MB_YESNO | MB_ICONINFORMATION
-    # MB_TOPMOST = 0x40000 — keeps the popup above all other windows
-    return ctypes.windll.user32.MessageBoxW(0, message, title, style | 0x40000)
+def message_box(title, message, style=MB_ICONINFORMATION):
+    """Show an always-on-top Windows message box. Returns button ID."""
+    return ctypes.windll.user32.MessageBoxW(0, message, title, style | MB_FLAGS)
 
 
 def download_and_install(asset_url, release_page_url):
     """Download installer and run it. Falls back to opening browser."""
     if asset_url:
         try:
+            # Show "Downloading..." in a background thread
+            downloading_title = "Study Aggregator - Downloading"
+
+            def show_downloading():
+                ctypes.windll.user32.MessageBoxW(
+                    0, "Downloading update, please wait...",
+                    downloading_title, MB_ICONINFORMATION | MB_FLAGS
+                )
+
+            msg_thread = threading.Thread(target=show_downloading, daemon=True)
+            msg_thread.start()
+
+            # Download the installer
             req = Request(asset_url, headers={"User-Agent": "Study-Aggregator-UpdateChecker"})
             with urlopen(req, timeout=300) as response:
                 installer_data = response.read()
@@ -80,10 +101,19 @@ def download_and_install(asset_url, release_page_url):
             with open(installer_path, "wb") as f:
                 f.write(installer_data)
 
+            # Dismiss the downloading message
+            hwnd = ctypes.windll.user32.FindWindowW(None, downloading_title)
+            if hwnd:
+                ctypes.windll.user32.SendMessageW(hwnd, WM_CLOSE, 0, 0)
+
+            # Launch the installer
             subprocess.Popen([installer_path], shell=False)
             return
         except Exception:
-            pass
+            # Try to dismiss the downloading message on error too
+            hwnd = ctypes.windll.user32.FindWindowW(None, downloading_title)
+            if hwnd:
+                ctypes.windll.user32.SendMessageW(hwnd, WM_CLOSE, 0, 0)
 
     # Fallback: open release page in browser
     if release_page_url:
@@ -107,12 +137,11 @@ def main():
 
     tag, asset_url, release_page_url = result
 
-    # MB_YESNO (0x04) | MB_ICONINFORMATION (0x40) = 0x44
     response = message_box(
         "Study Aggregator Update",
         f"A new version ({tag}) of Study Aggregator is available.\n\n"
         "Would you like to download and install it now?",
-        0x44,
+        MB_YESNO | MB_ICONINFORMATION,
     )
 
     # IDYES = 6
