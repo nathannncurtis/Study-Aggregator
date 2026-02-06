@@ -56,7 +56,6 @@ if getattr(sys, 'frozen', False):
 
 import pydicom
 import clipboard
-from collections import defaultdict
 import pyzipper
 import shutil
 import tempfile
@@ -74,13 +73,9 @@ import gc
 from functools import lru_cache
 import mmap
 import logging
-import traceback
 import subprocess
-import re
 import json
 from pathlib import Path
-from PyQt5.QtPrintSupport import QPrinter
-from PyQt5.QtGui import QTextDocument, QFont, QTextCursor, QTextTableFormat, QTextCharFormat
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -114,22 +109,11 @@ def setup_logging():
                 app_dir = os.path.dirname(os.path.abspath(__file__))
             
             log_file_path = os.path.join(app_dir, "dicom_aggregator.log")
-            
-            # Test if we can write to the log directory
-            test_write_path = os.path.join(app_dir, "test_write.tmp")
-            try:
-                with open(test_write_path, 'w') as test_file:
-                    test_file.write("test")
-                os.remove(test_write_path)
-                log_writable = True
-            except Exception:
-                log_writable = False
-            
-            if not log_writable:
-                # Fallback to temp directory if app directory isn't writable
-                import tempfile
-                log_file_path = os.path.join(tempfile.gettempdir(), "dicom_aggregator.log")
-                print(f"WARNING: Cannot write to app directory, using temp log: {log_file_path}", file=sys.stderr)
+
+            # ALWAYS write to app directory, even when frozen - force it
+            print(f"Log file will be written to: {log_file_path}", file=sys.stderr)
+            print(f"App directory: {app_dir}", file=sys.stderr)
+            print(f"Frozen: {getattr(sys, 'frozen', False)}", file=sys.stderr)
             
             has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in logger.handlers)
             
@@ -443,106 +427,11 @@ def show_error_popup(message):
         # Fallback to console output
         print(f"ERROR: {message}", file=sys.stderr)
 
-def generate_markdown_report(patients_data, settings):
-    """Generate a Markdown report from patient data"""
+# REMOVED - generate_markdown_report - Not needed, only using bd.pdf template for PDF generation
+
+def save_patient_data_as_pdf(patient_data, save_path):
+    """Generate a PDF for a single patient using bd.pdf template"""
     try:
-        # Build Markdown content
-        md_parts = []
-
-        # Header
-        md_parts.append(f"# DICOM Study Report\n\n")
-        md_parts.append(f"**Generated on:** {time.strftime('%B %d, %Y at %I:%M %p')}\n\n")
-        md_parts.append("---\n\n")
-
-        # Get facility info from first patient with data
-        facility_name = None
-        facility_address = None
-        facility_dept = None
-
-        for patient in patients_data.values():
-            if patient.get('institution_name'):
-                facility_name = patient.get('institution_name')
-                facility_address = patient.get('institution_address')
-                facility_dept = patient.get('department_name')
-                break
-
-        # Add facility info if available
-        if facility_name:
-            md_parts.append(f"## Facility Information\n\n")
-            md_parts.append(f"**Institution:** {facility_name}\n\n")
-            if facility_dept:
-                md_parts.append(f"**Department:** {facility_dept}\n\n")
-            if facility_address:
-                md_parts.append(f"**Address:** {facility_address}\n\n")
-            md_parts.append("---\n\n")
-
-        # Sort patients
-        def sort_patients(patient_data):
-            try:
-                pid = patient_data.get('patient_id') or 'ZZZZ'
-                name = patient_data.get('patient_name', 'Unknown')
-                try:
-                    if pid and pid.isdigit():
-                        pid_val = pid.zfill(10)
-                    else:
-                        pid_val = str(pid) if pid else 'ZZZZ'
-                except:
-                    pid_val = str(pid) if pid else 'ZZZZ'
-                return (pid_val, name.lower())
-            except Exception as e:
-                logging.warning(f"Error sorting patient data: {e}")
-                return ('ZZZZ', 'unknown')
-
-        sorted_patients = sorted(patients_data.values(), key=sort_patients)
-
-        # Add patient data
-        for patient in sorted_patients:
-            try:
-                pid = patient.get('patient_id', '')
-                name = patient.get('patient_name', 'Unknown')
-                dob = patient.get('patient_dob', 'Unknown')
-
-                # Patient header
-                md_parts.append(f"## NAME: {name} | DOB: {dob} | ID: {pid if pid else 'Unknown'}\n\n")
-                md_parts.append(f"### STUDIES\n\n")
-
-                # Studies table
-                md_parts.append("| Date | Study Description | Series Count |\n")
-                md_parts.append("|------|-------------------|-------------|\n")
-
-                studies_dict = patient.get('studies', {})
-                if isinstance(studies_dict, dict) and studies_dict:
-                    sorted_studies = sorted(studies_dict.values(),
-                                          key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
-
-                    for study in sorted_studies:
-                        study_date = study.get('study_date', 'Unknown')
-                        study_desc = study.get('study_description', 'Unknown')
-                        all_series = study.get('all_series', set())
-                        series_count = len(all_series)
-
-                        md_parts.append(f"| {study_date} | {study_desc} | {series_count} series |\n")
-
-                md_parts.append("\n---\n\n")
-
-            except Exception as e:
-                logging.error(f"Error formatting patient data for Markdown: {e}")
-                continue
-
-        return ''.join(md_parts)
-
-    except Exception as e:
-        logging.error(f"Error generating Markdown report: {e}", exc_info=True)
-        return None
-
-def save_patient_data_as_pdf(merged_patients, settings, save_path):
-    """Generate PDF directly from patient data using bd.pdf template"""
-    try:
-        logging.info(f"=== SAVE_PATIENT_DATA_AS_PDF CALLED ===")
-        logging.info(f"Input save_path: {save_path}")
-        logging.info(f"Number of patients: {len(merged_patients)}")
-
-        # Ensure save_path has .pdf extension
         if not save_path.lower().endswith('.pdf'):
             save_path = save_path + '.pdf'
 
@@ -556,219 +445,80 @@ def save_patient_data_as_pdf(merged_patients, settings, save_path):
 
         if not os.path.exists(template_path):
             logging.error(f"Template bd.pdf not found at {template_path}")
-            raise FileNotFoundError(f"Template bd.pdf not found at {template_path}")
+            show_error_popup(f"Template bd.pdf not found. Cannot generate PDF.")
+            return None
 
-        # Extract patient name and studies directly from merged_patients
-        patient_name = ""
+        # Extract patient name
+        patient_name = patient_data.get('patient_name', 'Unknown')
+        if patient_name:
+            patient_name = patient_name.title()
+
+        # Build study lines
         studies = []
+        studies_dict = patient_data.get('studies', {})
 
-        # Get first patient
-        for patient_key, patient_data in merged_patients.items():
-            patient_name = patient_data.get('name', '')
+        sorted_studies = sorted(studies_dict.values(),
+                                key=lambda x: (x.get('study_date', 'Unknown'),
+                                               x.get('study_description', '')))
 
-            # Convert patient name to sentence case (capitalize first letter of each word)
-            if patient_name:
-                patient_name = patient_name.title()
+        for study in sorted_studies:
+            study_date = study.get('study_date', 'Unknown')
+            study_desc = study.get('study_description', 'Unknown Study')
+            series_count = len(study.get('all_series', set()))
 
-            # Extract all studies (studies is a dict with study_uid as keys)
-            studies_dict = patient_data.get('studies', {})
-            for study_uid, study_data in studies_dict.items():
-                study_date = study_data.get('study_date', 'Unknown')
-                study_desc = study_data.get('study_description', 'Unknown Study')
-                series_count = len(study_data.get('all_series', set()))
+            if study_date and study_date != 'Unknown':
+                study_date = study_date.replace('-', '/')
 
-                # Convert date format from MM-DD-YYYY to MM/DD/YYYY
-                if study_date and study_date != 'Unknown':
-                    study_date = study_date.replace('-', '/')
+            if study_desc:
+                study_desc = study_desc.title()
 
-                # Convert study description to sentence case
-                if study_desc:
-                    study_desc = study_desc.title()
+            if series_count > 0:
+                study_line = f"{study_date}, {study_desc} ({series_count} series)"
+            else:
+                study_line = f"{study_date}, {study_desc}"
+            studies.append(study_line)
 
-                # Format: MM/DD/YYYY, Description, US (Count series)
-                study_line = f"{study_date}, {study_desc}, US ({series_count} series)"
-                studies.append(study_line)
+        logging.info(f"Generating PDF - Patient: {patient_name}, Studies: {len(studies)}")
 
-            # Only process first patient
-            break
+        _fill_pdf_form_fields(template_path, save_path, patient_name, studies)
 
-        logging.info(f"Extracted patient name: {patient_name}")
-        logging.info(f"Extracted {len(studies)} studies")
-
-        # Generate PDF with template (location left blank)
-        _create_pdf_from_template(template_path, save_path, patient_name, "", studies)
-
-        # Verify file was created
         if os.path.exists(save_path):
-            file_size = os.path.getsize(save_path)
-            logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
+            logging.info(f"PDF created at {save_path} ({os.path.getsize(save_path)} bytes)")
             return save_path
         else:
-            logging.error(f"PDF file was NOT created at {save_path}")
-            raise Exception(f"PDF file was not created at {save_path}")
+            logging.error(f"PDF was not created at {save_path}")
+            return None
 
     except Exception as e:
         logging.error(f"Error saving PDF report: {e}", exc_info=True)
         return None
 
 
-def save_markdown_as_pdf(markdown_content, save_path):
-    """Generate PDF using bd.pdf template with overlaid study information"""
+def _fill_pdf_form_fields(template_path, output_path, patient_name, studies):
+    """Fill PDF form fields — one patient per PDF, paginated across pages"""
     try:
-        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
-        logging.info(f"Input save_path: {save_path}")
-        logging.info(f"Markdown content length: {len(markdown_content)}")
-
-        # Ensure save_path has .pdf extension
-        if not save_path.lower().endswith('.pdf'):
-            save_path = save_path + '.pdf'
-
-        # Find bd.pdf template
-        if getattr(sys, 'frozen', False):
-            # Running as frozen executable
-            base_path = os.path.dirname(sys.executable)
-        else:
-            # Running as script
-            base_path = os.path.dirname(os.path.abspath(__file__))
-
-        template_path = os.path.join(base_path, 'bd.pdf')
-
-        if not os.path.exists(template_path):
-            logging.error(f"Template bd.pdf not found at {template_path}")
-            raise FileNotFoundError(f"Template bd.pdf not found at {template_path}")
-
-        # Parse markdown to extract patient and study data
-        lines = markdown_content.split('\n')
-
-        logging.info(f"Markdown content:\n{markdown_content}")
-        logging.info(f"Total lines in markdown: {len(lines)}")
-
-        # Extract patient name from first patient header
-        patient_name = ""
-        for line in lines:
-            if line.startswith('## NAME:'):
-                # Extract name from format: ## NAME: John Doe | DOB: ... | ID: ...
-                parts = line[3:].split('|')
-                if parts:
-                    patient_name = parts[0].replace('NAME:', '').strip()
-                    break
-
-        # Extract facility location
-        location = ""
-        for line in lines:
-            if 'Facility' in line or 'facility' in line:
-                # Try to extract facility name
-                if '**' in line:
-                    clean = line.replace('**', '').strip()
-                    if 'Facility' in clean:
-                        location = clean.replace('Facility Information:', '').replace('Facility:', '').strip()
-                        break
-
-        # Extract all studies with format: Date, Description, Modality (Count)
-        studies = []
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            # Find study tables
-            if line.startswith('|') and 'Date' in line:
-                i += 1
-                # Skip separator line
-                if i < len(lines) and '---' in lines[i]:
-                    i += 1
-                # Collect study rows
-                while i < len(lines) and lines[i].strip().startswith('|'):
-                    row = lines[i].strip()
-                    cells = [cell.strip() for cell in row.split('|')[1:-1]]
-                    if len(cells) >= 4:  # Date, Description, Modality, Count
-                        # Format: MM/DD/YYYY, Description, Modality (Count)
-                        study_line = f"{cells[0]}, {cells[1]}, {cells[2]} ({cells[3]})"
-                        studies.append(study_line)
-                    i += 1
-                i -= 1
-            i += 1
-
-        logging.info(f"Extracted patient: {patient_name}")
-        logging.info(f"Extracted location: {location}")
-        logging.info(f"Extracted {len(studies)} studies")
-
-        # Generate PDF with template overlay
-        _create_pdf_from_template(template_path, save_path, patient_name, location, studies)
-
-        # Verify file was created
-        if os.path.exists(save_path):
-            file_size = os.path.getsize(save_path)
-            logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
-            return save_path
-        else:
-            logging.error(f"PDF file was NOT created at {save_path}")
-            raise Exception(f"PDF file was not created at {save_path}")
-
-    except Exception as e:
-        logging.error(f"Error saving PDF report: {e}", exc_info=True)
-        return None
-
-
-def _create_pdf_from_template(template_path, output_path, patient_name, location, studies):
-    """Create PDF by filling form fields or adding text to bd.pdf template"""
-    try:
-        # Read the template
-        template_reader = PdfReader(template_path)
-
-        # Check if PDF has form fields
-        if template_reader.get_form_text_fields():
-            logging.info("PDF has form fields - using form filling method")
-            fields = template_reader.get_form_text_fields()
-            logging.info(f"Available form fields: {list(fields.keys())}")
-            # Use form filling
-            _fill_pdf_form_fields(template_path, output_path, patient_name, location, studies)
-        else:
-            logging.info("PDF has no form fields - using text overlay method")
-            # No form fields, use overlay method
-            _fill_pdf_with_overlay(template_path, output_path, patient_name, location, studies)
-
-    except Exception as e:
-        logging.error(f"Error creating PDF from template: {e}", exc_info=True)
-        raise
-
-
-def _fill_pdf_form_fields(template_path, output_path, patient_name, location, studies):
-    """Fill PDF form fields directly - creates separate PDFs and combines them"""
-    try:
-        import tempfile
-
-        # 30 studies per page as requested
         studies_per_page = 30
         total_pages = max(1, (len(studies) + studies_per_page - 1) // studies_per_page)
 
-        logging.info(f"Patient name: {patient_name}")
-        logging.info(f"Location: {location}")
-        logging.info(f"Number of studies: {len(studies)}")
-        logging.info(f"Total pages needed: {total_pages}")
+        logging.info(f"PDF pagination: {len(studies)} studies across {total_pages} page(s)")
 
-        # Create separate PDF for each page, then combine
         temp_files = []
 
         for page_num in range(total_pages):
-            # Get studies for this page
             start_idx = page_num * studies_per_page
             end_idx = min(start_idx + studies_per_page, len(studies))
             page_studies = studies[start_idx:end_idx]
 
-            # Build the studies text for this page
             studies_text = "\n".join(page_studies)
 
-            logging.info(f"Page {page_num + 1}: Studies {start_idx + 1}-{end_idx} ({len(page_studies)} studies)")
-
-            # Create a new reader and writer for this page
             template_reader = PdfReader(template_path)
             page_writer = PdfWriter()
             page_writer.clone_document_from_reader(template_reader)
 
-            # Fill form fields
             field_values = {
                 "Regarding": patient_name if patient_name else "",
-                "Location": location if location else "",
-                "WO#": "",  # Leave blank
+                "Location": "",
+                "WO#": "",
                 "Page": str(page_num + 1),
                 "Of": str(total_pages),
                 "List of Studies": studies_text
@@ -779,258 +529,31 @@ def _fill_pdf_form_fields(template_path, output_path, patient_name, location, st
                 field_values
             )
 
-            # Write to temp file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             temp_files.append(temp_file.name)
             page_writer.write(temp_file)
             temp_file.close()
 
-        # Now combine all temp PDFs into final output
+        # Combine all pages into final output
         final_writer = PdfWriter()
         for temp_path in temp_files:
             reader = PdfReader(temp_path)
             final_writer.add_page(reader.pages[0])
 
-        # Write final output
         with open(output_path, 'wb') as output_file:
             final_writer.write(output_file)
 
-        # Clean up temp files
         for temp_path in temp_files:
             try:
                 os.remove(temp_path)
             except:
                 pass
 
-        logging.info(f"Created PDF with form fields filled - {total_pages} page(s)")
+        logging.info(f"Created PDF with {total_pages} page(s)")
 
     except Exception as e:
         logging.error(f"Error filling PDF form fields: {e}", exc_info=True)
         raise
-
-
-def _fill_pdf_with_overlay(template_path, output_path, patient_name, location, studies):
-    """Add text overlay to PDF (for PDFs without form fields)"""
-    try:
-        # Estimate studies per page
-        studies_per_page = 25
-        total_pages = max(1, (len(studies) + studies_per_page - 1) // studies_per_page)
-
-        pdf_writer = PdfWriter()
-
-        for page_num in range(total_pages):
-            # Get studies for this page
-            start_idx = page_num * studies_per_page
-            end_idx = min(start_idx + studies_per_page, len(studies))
-            page_studies = studies[start_idx:end_idx]
-
-            # Create overlay with ReportLab
-            packet = io.BytesIO()
-            can = canvas.Canvas(packet, pagesize=letter)
-
-            # Regarding field - approximately at y=535 from bottom
-            if patient_name and page_num == 0:
-                can.drawString(200, 535, patient_name)
-
-            # Location field - approximately at y=510 from bottom
-            if location and page_num == 0:
-                can.drawString(200, 510, location)
-
-            # Studies list starts at approximately y=430 from bottom
-            y_position = 430
-            line_height = 14
-
-            for study in page_studies:
-                can.drawString(80, y_position, study)
-                y_position -= line_height
-                if y_position < 100:
-                    break
-
-            # Page number at bottom
-            page_text = f"Page {page_num + 1} of {total_pages}"
-            can.drawString(280, 50, page_text)
-
-            can.save()
-            packet.seek(0)
-
-            # Read template and overlay
-            template_reader = PdfReader(template_path)
-            template_page = template_reader.pages[0]
-
-            # Merge overlay
-            overlay_reader = PdfReader(packet)
-            overlay_page = overlay_reader.pages[0]
-            template_page.merge_page(overlay_page)
-
-            pdf_writer.add_page(template_page)
-
-        # Write output
-        with open(output_path, 'wb') as output_file:
-            pdf_writer.write(output_file)
-
-        logging.info(f"Created PDF with text overlay - {total_pages} page(s)")
-
-    except Exception as e:
-        logging.error(f"Error creating PDF overlay: {e}", exc_info=True)
-        raise
-
-
-def save_markdown_as_pdf_OLD_REPORTLAB_VERSION(markdown_content, save_path):
-    """OLD VERSION - Save Markdown content as PDF using ReportLab - simple black and white format"""
-    try:
-        logging.info(f"=== SAVE_MARKDOWN_AS_PDF CALLED ===")
-        logging.info(f"Input save_path: {save_path}")
-        logging.info(f"Markdown content length: {len(markdown_content)}")
-
-        # Ensure save_path has .pdf extension
-        if not save_path.lower().endswith('.pdf'):
-            save_path = save_path + '.pdf'
-
-        # This version requires ReportLab - NOT USED ANYMORE
-        if False:
-            try:
-                logging.info(f"Converting Markdown to PDF using ReportLab...")
-
-                # Create PDF document
-                doc = SimpleDocTemplate(save_path, pagesize=letter,
-                                       rightMargin=40, leftMargin=40,
-                                       topMargin=40, bottomMargin=40)
-
-                # Container for PDF elements
-                story = []
-
-                # Define styles
-                styles = getSampleStyleSheet()
-
-                # Simple black and white styles
-                title_style = ParagraphStyle(
-                    'Title',
-                    parent=styles['Heading1'],
-                    fontSize=16,
-                    textColor=colors.black,
-                    spaceAfter=20,
-                    alignment=TA_LEFT,
-                    fontName='Helvetica-Bold'
-                )
-
-                heading_style = ParagraphStyle(
-                    'Heading',
-                    parent=styles['Normal'],
-                    fontSize=11,
-                    textColor=colors.black,
-                    spaceAfter=6,
-                    spaceBefore=6,
-                    fontName='Helvetica-Bold'
-                )
-
-                normal_style = styles['Normal']
-
-                # Add main header
-                story.append(Paragraph("X-RAY BREAKDOWN", title_style))
-                story.append(Spacer(1, 0.3*inch))
-
-                # Parse markdown and build PDF
-                lines = markdown_content.split('\n')
-                i = 0
-
-                # Extract facility info first
-                facility_info = []
-                while i < len(lines):
-                    line = lines[i].strip()
-                    if 'Facility Information' in line:
-                        i += 1
-                        # Get next lines until we hit a separator
-                        while i < len(lines) and lines[i].strip() != '---':
-                            line = lines[i].strip()
-                            if line.startswith('**'):
-                                # Remove ** and extract info
-                                clean_line = line.replace('**', '')
-                                facility_info.append(clean_line)
-                            i += 1
-                        break
-                    i += 1
-
-                # Add facility info if found
-                if facility_info:
-                    for info in facility_info:
-                        story.append(Paragraph(info, normal_style))
-                    story.append(Spacer(1, 0.2*inch))
-
-                # Reset to parse patient data
-                i = 0
-                while i < len(lines):
-                    line = lines[i].strip()
-
-                    # Patient header (NAME: ... | DOB: ... | ID: ...)
-                    if line.startswith('## NAME:'):
-                        # Extract just the text without the ##
-                        patient_info = line[3:]
-                        story.append(Paragraph(patient_info, heading_style))
-                        story.append(Spacer(1, 0.05*inch))
-
-                    # STUDIES header - just add small space, don't print it
-                    elif line.startswith('### STUDIES'):
-                        story.append(Spacer(1, 0.05*inch))
-
-                    # Table
-                    elif line.startswith('|') and 'Date' in line:
-                        # Collect all table rows
-                        table_data = []
-                        while i < len(lines) and lines[i].strip().startswith('|'):
-                            row_line = lines[i].strip()
-                            # Skip separator line
-                            if '---' not in row_line:
-                                cells = [cell.strip() for cell in row_line.split('|')[1:-1]]
-                                table_data.append(cells)
-                            i += 1
-                        i -= 1  # Back up one since we'll increment at the end of loop
-
-                        if table_data:
-                            # Create simple table
-                            table = Table(table_data, hAlign='LEFT')
-
-                            # Simple black and white table style
-                            table_style = TableStyle([
-                                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-                                ('TOPPADDING', (0, 0), (-1, 0), 8),
-                                ('LEFTPADDING', (0, 0), (-1, -1), 6),
-                                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-                                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-                            ])
-                            table.setStyle(table_style)
-                            story.append(table)
-                            story.append(Spacer(1, 0.15*inch))
-
-                    i += 1
-
-                # Build PDF
-                doc.build(story)
-
-                # Verify file was created
-                if os.path.exists(save_path):
-                    file_size = os.path.getsize(save_path)
-                    logging.info(f"PDF successfully created at {save_path}, size: {file_size} bytes")
-                    return save_path
-                else:
-                    logging.error(f"PDF file was NOT created at {save_path}")
-                    raise Exception(f"PDF file was not created at {save_path}")
-
-            except Exception as pdf_error:
-                logging.error(f"ReportLab PDF generation failed: {pdf_error}", exc_info=True)
-                raise Exception(f"PDF generation failed: {pdf_error}")
-        else:
-            # ReportLab not available - this should never happen
-            error_msg = "CRITICAL ERROR: ReportLab is not available. Cannot generate PDF."
-            logging.error(error_msg)
-            raise ImportError(error_msg)
-
-    except Exception as e:
-        logging.error(f"Error saving report: {e}", exc_info=True)
-        return None
 
 def show_success_popup(message):
     logging.info(f"Displaying success popup: {message}")
@@ -1442,7 +965,7 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
             if file.lower().endswith('.zip'): continue
             file_path = os.path.join(root, file)
             ext = os.path.splitext(file)[1].lower()
-            if ext in ('.dcm', '.ima', '.dicom', '') or not ext :
+            if ext in ('.dcm', '.ima', '.dicom', '') or not ext or ext.lstrip('.').isdigit():
                 dicom_files.append(file_path)
     
     logging.info(f"Found {len(dicom_files)} potential DICOM files in extracted {zip_path}")
@@ -1486,17 +1009,7 @@ def process_zip_file(zip_path, password=None, max_workers=None, progress_callbac
 
     return found_studies
 
-def find_zip_files(directory):
-    zip_files = []
-    try:
-        for root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if not d.startswith('.')] 
-            for file in files:
-                if file.lower().endswith('.zip'):
-                    zip_files.append(os.path.join(root, file))
-    except Exception as e:
-        logging.error(f"Error scanning directory {directory} for zip files: {e}")
-    return zip_files
+# REMOVED - find_zip_files - Functionality inlined in ProcessingThread.extract_directory_info()
 
 def is_patient_all_unknown(patient_data):
     """Check if a patient has all unknown/empty identifying information"""
@@ -1795,7 +1308,7 @@ class ProcessingThread(QThread):
                     else:
                         # Check if it could be a DICOM file
                         ext = os.path.splitext(file_name)[1].lower()
-                        if ext in ('.dcm', '.ima', '.dicom', '') or not ext:
+                        if ext in ('.dcm', '.ima', '.dicom', '') or not ext or ext.lstrip('.').isdigit():
                             all_potential_dicom_files.append(file_path)
 
                     # Update progress every 500 files during scan
@@ -2266,37 +1779,41 @@ def main_app_logic():
                     logging.debug(f"Final output preview: {output_text[:500]}...")
 
                 # Handle PDF output
-                pdf_path = None
+                pdf_count = 0
                 if to_pdf:
                     logging.info("=== PDF GENERATION STARTED ===")
                     try:
+                        patient_list = list(merged_patients.values())
+                        num_patients = len(patient_list)
+
+                        # Derive default filename from input path
+                        input_basename = os.path.splitext(os.path.basename(validated_path))[0]
+                        if not input_basename:
+                            input_basename = "DICOM_Report"
+
+                        # Notify user if multiple patients found
+                        if num_patients > 1:
+                            info_msg = QMessageBox()
+                            info_msg.setIcon(QMessageBox.Information)
+                            info_msg.setWindowTitle("Multiple Patients")
+                            info_msg.setText(
+                                f"{num_patients} patients were found.\n"
+                                "A separate PDF will be created for each patient."
+                            )
+                            info_msg.exec_()
+
                         # Get save directory from settings
                         default_dir = settings.get('last_save_directory', str(Path.home() / "Desktop"))
-                        logging.info(f"Default directory from settings: {default_dir}")
-
-                        # Verify directory exists, fallback to desktop if not
                         if not os.path.exists(default_dir):
                             default_dir = str(Path.home() / "Desktop")
-                            logging.warning(f"Saved directory doesn't exist, using desktop: {default_dir}")
-                        else:
-                            logging.info(f"Default directory exists: {default_dir}")
 
-                        # Show file save dialog
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        default_filename = f"DICOM_Report_{timestamp}.pdf"
-                        default_path = os.path.join(default_dir, default_filename)
-                        logging.info(f"Default save path: {default_path}")
+                        default_filename = f"{input_basename}.pdf"
 
-                        # Use static method for better compatibility
-                        logging.info("Creating file save dialog...")
-                        logging.info(f"Default dir: {default_dir}, Default filename: {default_filename}")
-
-                        # Show progress dialog to ensure we have a parent window
                         progress_dialog.show()
                         progress_dialog.raise_()
                         progress_dialog.activateWindow()
 
-                        file_path, selected_filter = QFileDialog.getSaveFileName(
+                        file_path, _ = QFileDialog.getSaveFileName(
                             progress_dialog,
                             "Save DICOM Report",
                             os.path.join(default_dir, default_filename),
@@ -2304,42 +1821,42 @@ def main_app_logic():
                             options=QFileDialog.DontUseNativeDialog
                         )
 
-                        logging.info(f"File dialog returned. File path: '{file_path}', Filter: {selected_filter}")
-
-                        # getSaveFileName returns empty string if cancelled
                         if not file_path:
                             logging.info("User cancelled file save dialog")
-                            file_path = None
-                        else:
-                            logging.info(f"User selected file path: {file_path}")
-
-                        if file_path:
-                            logging.info(f"Processing file path: {file_path}")
-                            # Save the directory for next time
-                            save_dir = os.path.dirname(file_path)
-                            logging.info(f"Saving directory to settings: {save_dir}")
-                            settings['last_save_directory'] = save_dir
-                            save_settings(settings)
-
-                            # Generate PDF directly from patient data
-                            logging.info("Generating PDF report...")
-                            pdf_path = save_patient_data_as_pdf(merged_patients, settings, file_path)
-                            logging.info(f"save_patient_data_as_pdf returned: {pdf_path}")
-                            if pdf_path:
-                                logging.info(f"Report saved successfully to: {pdf_path}")
-                            else:
-                                logging.error("save_patient_data_as_pdf returned None")
-                                show_error_popup("Failed to generate PDF report")
-                        else:
-                            logging.info("No file path - user cancelled file save dialog")
                             if not to_clipboard:
-                                # If only PDF was selected and user cancelled, quit
-                                logging.info("Only PDF was selected and user cancelled, quitting")
                                 progress_dialog.close()
                                 app.quit()
                                 return
+                        else:
+                            # Save directory for next time
+                            save_dir = os.path.dirname(file_path)
+                            settings['last_save_directory'] = save_dir
+                            save_settings(settings)
+
+                            if num_patients == 1:
+                                # Single patient — use exact filename
+                                result = save_patient_data_as_pdf(patient_list[0], file_path)
+                                if result:
+                                    pdf_count = 1
+                                else:
+                                    show_error_popup("Failed to generate PDF report.")
                             else:
-                                logging.info("Clipboard also selected, continuing without PDF")
+                                # Multiple patients — append patient name to filename
+                                base_path_no_ext = os.path.splitext(file_path)[0]
+                                for patient in patient_list:
+                                    pname = patient.get('patient_name', 'Unknown')
+                                    safe_name = "".join(
+                                        c for c in pname if c.isalnum() or c in (' ', '-', '_')
+                                    ).strip()
+                                    patient_path = f"{base_path_no_ext} - {safe_name}.pdf"
+                                    result = save_patient_data_as_pdf(patient, patient_path)
+                                    if result:
+                                        pdf_count += 1
+
+                                if pdf_count == 0:
+                                    show_error_popup("Failed to generate PDF reports.")
+                                else:
+                                    logging.info(f"Generated {pdf_count}/{num_patients} PDF(s)")
 
                     except Exception as pdf_error:
                         logging.error(f"Exception in PDF generation: {pdf_error}", exc_info=True)
@@ -2361,9 +1878,10 @@ def main_app_logic():
                 success_messages = []
                 if to_clipboard and output_text:
                     success_messages.append("copied to clipboard")
-                if pdf_path:
-                    file_type = "PDF" if pdf_path.endswith('.pdf') else "HTML"
-                    success_messages.append(f"saved as {file_type}")
+                if pdf_count == 1:
+                    success_messages.append("saved as PDF")
+                elif pdf_count > 1:
+                    success_messages.append(f"saved as {pdf_count} PDFs")
 
                 if success_messages:
                     msg = f"DICOM study information has been successfully {' and '.join(success_messages)}!"
@@ -2436,3 +1954,4 @@ if __name__ == "__main__":
         except:
             pass
         sys.exit(1)
+        
