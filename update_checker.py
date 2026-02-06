@@ -7,8 +7,21 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 import ctypes
 
-CURRENT_VERSION = "2.2.0"
 GITHUB_REPO = "nathannncurtis/Study-Aggregator"
+
+def get_current_version():
+    """Read version from version.txt bundled alongside the executable."""
+    try:
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(base_path, 'version.txt'), 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return "0.0.0"
+
+CURRENT_VERSION = get_current_version()
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 
