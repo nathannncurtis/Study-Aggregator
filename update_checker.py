@@ -64,7 +64,8 @@ def check_for_update():
 def message_box(title, message, style=0x40):
     """Show a Windows message box. Returns button ID."""
     # 0x40 = MB_ICONINFORMATION, 0x44 = MB_YESNO | MB_ICONINFORMATION
-    return ctypes.windll.user32.MessageBoxW(0, message, title, style)
+    # MB_TOPMOST = 0x40000 — keeps the popup above all other windows
+    return ctypes.windll.user32.MessageBoxW(0, message, title, style | 0x40000)
 
 
 def download_and_install(asset_url, release_page_url):
