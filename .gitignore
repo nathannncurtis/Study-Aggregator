@@ -1,0 +1,14 @@
+\.git
+*.log
+__pycache__
+*.swp
+build\
+Output
+*.pdf
+/.claude
+/.vscode
+/build
+*.zip
+/625874-03 Dovolis
+"625874-03 Dovolis.zip"
+dicom_aggregator_settings.json

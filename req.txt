@@ -1,0 +1,6 @@
+pydicom>=2.3.0
+clipboard>=0.0.4
+pyzipper>=0.3.6
+PyQt5>=5.15.0
+pypdf>=3.0.0
+reportlab>=3.6.0
