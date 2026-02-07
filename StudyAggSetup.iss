@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Study Aggregator"
-#define MyAppVersion "2.5.3"
+#define MyAppVersion "2.5.4"
 #define MyAppPublisher "Nathan Curtis"
 #define MyAppURL "https://github.com/nathannncurtis/study-aggregator"
 #define MyAppExeName "Study Aggregator.exe"
@@ -23,6 +23,8 @@ PrivilegesRequired=lowest
 Compression=lzma
 SolidCompression=yes
 WizardStyle=dynamic
+SignTool=MySignTool
+SignedUninstaller=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
