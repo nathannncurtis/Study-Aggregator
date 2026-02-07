@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Study Aggregator"
-#define MyAppVersion "2.5.4"
+#define MyAppVersion "2.5.5"
 #define MyAppPublisher "Nathan Curtis"
 #define MyAppURL "https://github.com/nathannncurtis/study-aggregator"
 #define MyAppExeName "Study Aggregator.exe"
@@ -22,6 +22,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 Compression=lzma
 SolidCompression=yes
+OutputBaseFilename=StudyAggregatorSetup
 WizardStyle=dynamic
 SignTool=MySignTool
 SignedUninstaller=yes
