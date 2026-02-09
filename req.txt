@@ -5,3 +5,4 @@ PyQt5>=5.15.0
 pypdf>=3.0.0
 reportlab>=3.6.0
 numpy>=2.1.0,<2.2.0
+windows-toasts>=1.2.0

@@ -1,6 +1,9 @@
 import subprocess
 import winreg
 
+AUMID = "Ronsin.StudyAggregator"
+
+
 def remove_context_menu():
     try:
         # Remove context menu for files
@@ -23,6 +26,7 @@ def remove_context_menu():
     except Exception as e:
         print(f"Failed to modify the registry: {e}")
 
+
 def remove_registry_entry(key_path):
     """Helper function to remove a context menu entry"""
     try:
@@ -34,8 +38,9 @@ def remove_registry_entry(key_path):
     except Exception as e:
         print(f"Error removing registry entry: {e}")
 
+
 def remove_scheduled_update_check():
-    """Remove the daily update check scheduled task"""
+    """Remove the update check scheduled task"""
     task_name = "StudyAggregatorUpdateCheck"
 
     try:
@@ -54,6 +59,21 @@ def remove_scheduled_update_check():
     except Exception as e:
         print(f"Error removing scheduled task: {e}")
 
+
+def remove_aumid():
+    """Remove the AUMID registry entry."""
+    key_path = rf"Software\Classes\AppUserModelId\{AUMID}"
+
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+        print(f"AUMID '{AUMID}' removed successfully.")
+    except FileNotFoundError:
+        print(f"AUMID registry entry not found (already removed).")
+    except Exception as e:
+        print(f"Error removing AUMID: {e}")
+
+
 if __name__ == "__main__":
     remove_context_menu()
     remove_scheduled_update_check()
+    remove_aumid()

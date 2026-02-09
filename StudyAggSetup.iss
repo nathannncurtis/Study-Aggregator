@@ -38,6 +38,10 @@ Source: "C:\Users\ncurtis\Documents\PROJECTS\!Completed Programs\Study Aggregato
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Ronsin.StudyAggregator"; ValueType: string; ValueName: "DisplayName"; ValueData: "Study Aggregator"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Ronsin.StudyAggregator"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\agg.ico"; Flags: uninsdeletekey
+
 [Run]
 Filename: "{app}\reg.exe"; Flags: nowait postinstall skipifsilent
 

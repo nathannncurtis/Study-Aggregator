@@ -2,6 +2,9 @@ import os
 import subprocess
 import winreg
 
+AUMID = "Ronsin.StudyAggregator"
+
+
 def add_context_menu():
     # Path to your EXE in the %appdata%\Study Aggregator folder
     exe_path = os.path.join(os.getenv('APPDATA'), 'Study Aggregator', 'Study Aggregator.exe')
@@ -31,6 +34,7 @@ def add_context_menu():
     except Exception as e:
         print(f"Failed to modify the registry: {e}")
 
+
 def add_registry_entry(key_path, menu_name, command, exe_path):
     """Helper function to create a context menu entry with icon from the EXE"""
     try:
@@ -47,8 +51,9 @@ def add_registry_entry(key_path, menu_name, command, exe_path):
     except Exception as e:
         print(f"Error adding registry entry at {key_path}: {e}")
 
+
 def add_scheduled_update_check():
-    """Create a daily scheduled task to check for updates at 1:00 AM"""
+    """Create a scheduled task to check for updates every 10 minutes when a user is logged on."""
     checker_path = os.path.join(os.getenv('APPDATA'), 'Study Aggregator', 'update_checker.exe')
     task_name = "StudyAggregatorUpdateCheck"
 
@@ -58,20 +63,38 @@ def add_scheduled_update_check():
                 "schtasks", "/create",
                 "/tn", task_name,
                 "/tr", f'"{checker_path}"',
-                "/sc", "daily",
-                "/st", "01:00",
+                "/sc", "minute",
+                "/mo", "10",
+                "/rl", "LIMITED",
+                "/it",
                 "/f",
             ],
             capture_output=True,
             text=True,
         )
         if result.returncode == 0:
-            print(f"Scheduled task '{task_name}' created successfully (daily at 1:00 AM).")
+            print(f"Scheduled task '{task_name}' created successfully (every 10 minutes).")
         else:
             print(f"Failed to create scheduled task: {result.stderr.strip()}")
     except Exception as e:
         print(f"Error creating scheduled task: {e}")
 
+
+def add_aumid():
+    """Register the AUMID so Windows toast notifications work with interactive buttons."""
+    icon_path = os.path.join(os.getenv('APPDATA'), 'Study Aggregator', 'agg.ico')
+    key_path = rf"Software\Classes\AppUserModelId\{AUMID}"
+
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Study Aggregator")
+            winreg.SetValueEx(key, "IconUri", 0, winreg.REG_SZ, icon_path)
+        print(f"AUMID '{AUMID}' registered successfully.")
+    except Exception as e:
+        print(f"Error registering AUMID: {e}")
+
+
 if __name__ == "__main__":
     add_context_menu()
     add_scheduled_update_check()
+    add_aumid()

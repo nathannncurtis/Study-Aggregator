@@ -43,6 +43,9 @@ build_exe_options = {
         # Utilities
         "clipboard", "ctypes",
 
+        # Toast notifications
+        "windows_toasts",
+
         # Windows-specific
         "ctypes.wintypes" if sys.platform == "win32" else None,
     ],
