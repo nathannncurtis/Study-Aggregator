@@ -3,14 +3,17 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
-from windows_toasts import Toast, ToastDisplayImage, InteractableToastNotifier, ToastButton
+from windows_toasts import Toast, InteractableWindowsToaster, ToastButton
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-UPDATE_SHARE = r"\\SERVER\SHARE\StudyAggregator"  # TODO: set actual UNC path
+UPDATE_SHARE = r"C:\Users\ncurtis\Documents\PROJECTS\!Completed Programs\Study Aggregator\Study Aggregator 2.0\update-tester"  # TODO: set actual UNC path
 AUMID = "Ronsin.StudyAggregator"
 INSTALLER_NAME = "StudyAggregatorSetup.exe"
 BLOCKING_PROCESSES = {"study aggregator.exe", "7z.exe", "7za.exe"}
+
+_exit_event = threading.Event()
 
 
 def get_local_version():
@@ -45,6 +48,7 @@ def is_process_running():
         result = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         for line in result.stdout.lower().splitlines():
             for proc in BLOCKING_PROCESSES:
@@ -65,14 +69,18 @@ def install_update():
         pass
 
 
-def on_button_clicked(args):
-    if args.arguments == "update":
+def on_activated(args):
+    if getattr(args, "arguments", "") == "update":
         install_update()
-    sys.exit(0)
+    _exit_event.set()
 
 
 def on_dismissed(args):
-    sys.exit(0)
+    _exit_event.set()
+
+
+def on_failed(args):
+    _exit_event.set()
 
 
 def main():
@@ -97,11 +105,15 @@ def main():
     toast.AddAction(ToastButton("Update Now", arguments="update"))
     toast.AddAction(ToastButton("Dismiss", arguments="dismiss"))
 
-    toast.on_activated = on_button_clicked
+    toast.on_activated = on_activated
     toast.on_dismissed = on_dismissed
+    toast.on_failed = on_failed
 
-    notifier = InteractableToastNotifier(AUMID)
+    notifier = InteractableWindowsToaster("Study Aggregator", notifierAUMID=AUMID)
     notifier.show_toast(toast)
+
+    # Keep alive until button clicked, dismissed, or 5 min safety timeout
+    _exit_event.wait(timeout=300)
 
 
 if __name__ == "__main__":
