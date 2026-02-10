@@ -8,7 +8,7 @@ import threading
 from windows_toasts import Toast, InteractableWindowsToaster, ToastButton
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-UPDATE_SHARE = r"C:\Users\ncurtis\Documents\PROJECTS\!Completed Programs\Study Aggregator\Study Aggregator 2.0\update-tester"  # TODO: set actual UNC path
+UPDATE_SHARE = r"\\ronsyn\Nathan programs\Study-Aggregator"
 AUMID = "Ronsin.StudyAggregator"
 INSTALLER_NAME = "StudyAggregatorSetup.exe"
 BLOCKING_PROCESSES = {"study aggregator.exe", "7z.exe", "7za.exe"}
