@@ -92,4 +92,4 @@ The frozen executable is output to `build/exe.win-amd64-3.13/`. Use [Inno Setup]
 
 ## License
 
-Proprietary software owned by Nathan Curtis. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.

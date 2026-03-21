@@ -8,7 +8,7 @@ import threading
 from windows_toasts import Toast, InteractableWindowsToaster, ToastButton
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-UPDATE_SHARE = r"\"
+UPDATE_SHARE = r""  # Configure for your environment
 AUMID = "NathanCurtis.StudyAggregator"
 INSTALLER_NAME = "StudyAggregatorSetup.exe"
 BLOCKING_PROCESSES = {"study aggregator.exe", "7z.exe", "7za.exe"}
