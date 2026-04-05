@@ -1,366 +1,134 @@
 import sys
 import os
+import subprocess
+import base64
+import json
+import time
+import logging
+from pathlib import Path
 
-if getattr(sys, 'frozen', False):
-    # Add lib directory to path for frozen executable
-    if hasattr(sys, '_MEIPASS'):
-        # PyInstaller
-        lib_path = os.path.join(sys._MEIPASS, 'lib')
-    else:
-        # cx_Freeze
-        lib_path = os.path.join(os.path.dirname(sys.executable), 'lib')
-
-    if os.path.exists(lib_path) and lib_path not in sys.path:
-        sys.path.insert(0, lib_path)
-        print(f"Added lib path to sys.path: {lib_path}")
-
-    # Create minimal mocks only for the most problematic modules
-    import types
-
-    # Mock only the data-related modules that cause file access issues
-    problematic_modules = [
-        'pydicom.data.data_manager',
-        'pydicom.data.download',
-        'pydicom.examples'
-    ]
-
-    for module_name in problematic_modules:
-        if module_name not in sys.modules:
-            mock_module = types.ModuleType(module_name)
-            mock_module.__file__ = '<frozen>'
-            mock_module.__path__ = []
-
-            # Add specific functions that might be called
-            if 'data_manager' in module_name:
-                mock_module.get_testdata_file = lambda *args, **kwargs: None
-                mock_module._get_testdata_file = lambda *args, **kwargs: None
-                mock_module.get_palette_files = lambda *args, **kwargs: []
-            elif 'download' in module_name:
-                mock_module.get_url_map = lambda: {}
-                mock_module.data_path_with_download = lambda *args, **kwargs: None
-                mock_module.get_data_root = lambda: os.getcwd()
-            elif 'examples' in module_name:
-                # Mock common example file attributes
-                for attr in ['ct', 'mr', 'rtplan', 'rtdose', 'rtstruct']:
-                    setattr(mock_module, attr, None)
-
-            sys.modules[module_name] = mock_module
-
-    # Also create a basic pydicom.data module to satisfy imports
-    if 'pydicom.data' not in sys.modules:
-        data_module = types.ModuleType('pydicom.data')
-        data_module.__file__ = '<frozen>'
-        data_module.__path__ = []
-        data_module.get_palette_files = lambda *args, **kwargs: []
-        sys.modules['pydicom.data'] = data_module
-
-import pydicom
 import clipboard
-import pyzipper
-import shutil
-import tempfile
 from PyQt5.QtWidgets import (QApplication, QMessageBox, QInputDialog, QLineEdit, QProgressBar,
-                              QLabel, QVBoxLayout, QWidget, QPushButton, QDialog, QCheckBox,
-                              QFileDialog, QHBoxLayout)
+                              QLabel, QVBoxLayout, QWidget)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
-import time
-import sys
-import ctypes
-import zipfile
-import concurrent.futures
-import gc
-from functools import lru_cache
-import mmap
-import logging
-import subprocess
-import json
-from pathlib import Path
-from pypdf import PdfReader, PdfWriter
 
-# --- Enhanced Logging Setup ---
+
+def _get_app_root():
+    """Get the application root directory, handling COIL bundled layouts."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    parent = os.path.dirname(os.path.dirname(app_dir))
+    if os.path.basename(os.path.dirname(app_dir)) == '_internal':
+        return parent
+    return app_dir
+
+
+APP_ROOT = _get_app_root()
+
+
+# --- Logging ---
+
 def setup_logging():
-    """Setup comprehensive logging to catch all errors - more robust for frozen executables"""
     try:
         log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
         logger = logging.getLogger()
         logger.setLevel(logging.DEBUG)
 
-        # Clear existing handlers to avoid duplicates
         for handler in logger.handlers[:]:
             if isinstance(handler, logging.StreamHandler) and handler.stream in [sys.stdout, sys.stderr]:
                 logger.removeHandler(handler)
 
         try:
-            # More robust path determination for frozen executables
-            if getattr(sys, 'frozen', False):
-                # We're running as frozen executable
-                if hasattr(sys, '_MEIPASS'):
-                    # PyInstaller
-                    app_dir = os.path.dirname(sys.executable)
-                else:
-                    # cx_Freeze - use executable directory
-                    app_dir = os.path.dirname(sys.executable)
-            else:
-                # Running as script
-                app_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            log_file_path = os.path.join(app_dir, "dicom_aggregator.log")
-
-            # ALWAYS write to app directory, even when frozen - force it
-            print(f"Log file will be written to: {log_file_path}", file=sys.stderr)
-            print(f"App directory: {app_dir}", file=sys.stderr)
-            print(f"Frozen: {getattr(sys, 'frozen', False)}", file=sys.stderr)
-            
-            has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path) for h in logger.handlers)
-            
+            log_file_path = os.path.join(APP_ROOT, "dicom_aggregator.log")
+            has_file_handler = any(
+                isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file_path)
+                for h in logger.handlers
+            )
             if not has_file_handler:
                 file_handler = logging.FileHandler(log_file_path, mode='a')
                 file_handler.setFormatter(log_formatter)
                 logger.addHandler(file_handler)
-                print(f"Log file created at: {log_file_path}", file=sys.stderr)
-            else:
-                print(f"Using existing log file: {log_file_path}", file=sys.stderr)
-                
-        except Exception as e:
-            print(f"CRITICAL: Error setting up file logger: {e}", file=sys.stderr)
-            # Add console handler as fallback
+        except Exception:
             console_handler = logging.StreamHandler(sys.stderr)
             console_handler.setFormatter(log_formatter)
             logger.addHandler(console_handler)
 
         logging.info("=== DICOM Aggregator Session Started ===")
-        logging.info("Logging initialized. Output directed to dicom_aggregator.log")
         logging.info(f"Running as frozen executable: {'Yes' if getattr(sys, 'frozen', False) else 'No'}")
-        logging.info(f"Executable path: {sys.executable if getattr(sys, 'frozen', False) else 'N/A'}")
         logging.info(f"Command line args: {sys.argv}")
         return True
-        
     except Exception as e:
         print(f"Critical: Failed to setup logging: {e}", file=sys.stderr)
         return False
 
-def debug_cd_drive_early(input_path):
-    """Early debugging for CD drive issues - prints to stderr immediately"""
-    try:
-        print(f"DEBUG: Early CD drive check for path: '{input_path}'", file=sys.stderr)
-        print(f"DEBUG: Path exists: {os.path.exists(input_path)}", file=sys.stderr)
-        print(f"DEBUG: Is file: {os.path.isfile(input_path)}", file=sys.stderr)
-        print(f"DEBUG: Is directory: {os.path.isdir(input_path)}", file=sys.stderr)
-        print(f"DEBUG: Current working directory: {os.getcwd()}", file=sys.stderr)
-        
-        if len(input_path) >= 2 and input_path[1] == ':':
-            drive_letter = input_path[0].upper()
-            print(f"DEBUG: Drive letter detected: {drive_letter}:", file=sys.stderr)
-            
-            try:
-                import ctypes
-                drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive_letter}:\\")
-                drive_types = {0: "Unknown", 1: "Invalid", 2: "Removable", 3: "Fixed", 4: "Network", 5: "CD-ROM", 6: "RAM"}
-                drive_type_name = drive_types.get(drive_type, 'Unknown')
-                print(f"DEBUG: Drive type: {drive_type_name} ({drive_type})", file=sys.stderr)
-                
-                if drive_type == 5:  # CD-ROM
-                    print("DEBUG: CD-ROM drive detected!", file=sys.stderr)
-                    
-            except Exception as e:
-                print(f"DEBUG: Could not determine drive type: {e}", file=sys.stderr)
-                
-        # Test basic operations
-        try:
-            if os.path.exists(input_path):
-                if os.path.isdir(input_path):
-                    contents = os.listdir(input_path)
-                    print(f"DEBUG: Directory contains {len(contents)} items", file=sys.stderr)
-                elif os.path.isfile(input_path):
-                    size = os.path.getsize(input_path)
-                    print(f"DEBUG: File size: {size} bytes", file=sys.stderr)
-            else:
-                print("DEBUG: Path does not exist!", file=sys.stderr)
-        except Exception as e:
-            print(f"DEBUG: Error accessing path: {e}", file=sys.stderr)
-            
-    except Exception as e:
-        print(f"DEBUG: Error in early CD drive check: {e}", file=sys.stderr)
 
-# Enhanced error handling function
 def handle_critical_error(error, context="Unknown"):
-    """Handle critical errors with user-friendly messages"""
     error_msg = str(error)
     logging.critical(f"Critical error in {context}: {error_msg}", exc_info=True)
-    
-    # Map common errors to user-friendly messages
+
     if "No module named" in error_msg:
-        user_msg = "Missing required software component. Please reinstall the application or contact support."
+        return "Missing required software component. Please reinstall the application."
     elif "Permission denied" in error_msg or "Access is denied" in error_msg:
-        user_msg = "Permission denied accessing files or directories. Please run as administrator or check file permissions."
-    elif "Memory" in error_msg or "MemoryError" in error_msg:
-        user_msg = "Insufficient memory to process files. Try processing smaller batches or restart the application."
-    elif "Timeout" in error_msg or "timeout" in error_msg:
-        user_msg = "Operation timed out. Files may be too large or system resources are limited."
-    elif "corrupted" in error_msg.lower() or "invalid" in error_msg.lower():
-        user_msg = "Invalid or corrupted file detected. Please verify file integrity and try again."
+        return "Permission denied accessing files or directories. Check file permissions."
+    elif "Memory" in error_msg:
+        return "Insufficient memory to process files. Try processing smaller batches."
     else:
-        user_msg = f"An unexpected error occurred: {error_msg}. Please check the log file for details."
-    
-    return user_msg
+        return f"An unexpected error occurred: {error_msg}. Check the log file for details."
 
-# --- End Enhanced Logging Setup ---
 
-# Initialize logging early
 setup_logging()
 
-try:
-    user32 = ctypes.WinDLL('user32', use_last_error=True)
-except Exception as e:
-    logging.warning(f"Could not load Windows user32 library: {e}")
-    user32 = None
+# --- Icon ---
 
-def set_busy_cursor():
-    try:
-        if user32:
-            user32.SetSystemCursor(user32.LoadCursorW(0, 32514), 32512)
-    except Exception as e:
-        logging.warning(f"Could not set busy cursor: {e}")
+icon_path = os.path.join(APP_ROOT, 'agg.ico')
 
-def reset_cursor():
-    try:
-        if user32:
-            user32.SystemParametersInfoW(87, 0, None, 0)
-    except Exception as e:
-        logging.warning(f"Could not reset cursor: {e}")
 
-# Determine icon_path safely
-try:
-    if getattr(sys, 'frozen', False):
-        application_path = os.path.dirname(sys.executable)
-    else:
-        application_path = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(application_path, 'agg.ico')
-except Exception as e:
-    logging.warning(f"Could not determine application path: {e}")
-    icon_path = 'agg.ico'
+# --- Engine binary discovery ---
 
-# 7zip detection and path finding
-def find_7zip():
-    """Find 7zip executable on the system"""
-    try:
-        possible_paths = [
-            r"C:\Program Files\7-Zip\7z.exe",
-            r"C:\Program Files (x86)\7-Zip\7z.exe",
-            "7z",  # In PATH
-            "7za", # Standalone version
-        ]
-        
-        for path in possible_paths:
-            try:
-                result = subprocess.run([path], capture_output=True, timeout=5)
-                logging.info(f"Found 7zip at: {path}")
-                return path
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, OSError):
-                continue
-        
-        logging.info("7zip not found on system, will use pyzipper fallback")
-        return None
-    except Exception as e:
-        logging.warning(f"Error during 7zip detection: {e}")
-        return None
+def find_engine_binary():
+    """Locate the study-agg-engine binary."""
+    candidates = [
+        os.path.join(APP_ROOT, 'study-agg-engine.exe'),
+        os.path.join(APP_ROOT, 'engine', 'target', 'release', 'study-agg-engine.exe'),
+        os.path.join(APP_ROOT, 'engine', 'target', 'debug', 'study-agg-engine.exe'),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            logging.info(f"Found engine binary: {path}")
+            return path
 
-# Global 7zip path
-SEVEN_ZIP_PATH = find_7zip()
+    logging.error("Engine binary not found. Searched: " + ", ".join(candidates))
+    return None
 
-# Settings management
-def get_settings_file():
-    """Get the path to the settings file"""
-    try:
-        if getattr(sys, 'frozen', False):
-            app_dir = os.path.dirname(sys.executable)
-        else:
-            app_dir = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(app_dir, 'dicom_aggregator_settings.json')
-    except Exception as e:
-        logging.error(f"Error determining settings file path: {e}")
-        return os.path.join(os.path.expanduser("~"), 'dicom_aggregator_settings.json')
 
-def load_settings():
-    """Load settings from file"""
-    settings_file = get_settings_file()
-    default_settings = {
-        'last_save_directory': str(Path.home() / "Desktop"),
-        'output_mode': 'clipboard'  # 'clipboard', 'pdf', or 'both'
-    }
-
-    try:
-        if os.path.exists(settings_file):
-            with open(settings_file, 'r') as f:
-                settings = json.load(f)
-                # Ensure all default keys exist
-                for key, value in default_settings.items():
-                    if key not in settings:
-                        settings[key] = value
-                return settings
-    except Exception as e:
-        logging.warning(f"Error loading settings: {e}")
-
-    return default_settings
-
-def save_settings(settings):
-    """Save settings to file"""
-    settings_file = get_settings_file()
-    try:
-        with open(settings_file, 'w') as f:
-            json.dump(settings, f, indent=2)
-        logging.info(f"Settings saved to {settings_file}")
-    except Exception as e:
-        logging.error(f"Error saving settings: {e}")
+# --- GUI Components ---
 
 class ProgressDialog(QWidget):
     def __init__(self, title="Processing"):
         super().__init__()
-        try:
-            self.setWindowTitle(title)
-            self.setWindowFlag(Qt.WindowStaysOnTopHint)
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
-            else:
-                logging.warning(f"Icon file not found at {icon_path}, not setting window icon for ProgressDialog.")
+        self.setWindowTitle(title)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint)
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
-            layout = QVBoxLayout()
+        layout = QVBoxLayout()
 
-            self.label = QLabel("Processing files...")
-            layout.addWidget(self.label)
+        self.label = QLabel("Processing files...")
+        layout.addWidget(self.label)
 
-            self.progress_bar = QProgressBar()
-            self.progress_bar.setMinimum(0)
-            self.progress_bar.setMaximum(100)
-            layout.addWidget(self.progress_bar)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        layout.addWidget(self.progress_bar)
 
-            # Add pause/resume button
-            self.pause_button = QPushButton("Pause")
-            self.pause_button.clicked.connect(self.toggle_pause)
-            layout.addWidget(self.pause_button)
-
-            self.setLayout(layout)
-            self.resize(400, 150)
-            self.is_paused = False
-        except Exception as e:
-            logging.error(f"Error initializing ProgressDialog: {e}", exc_info=True)
-
-    def toggle_pause(self):
-        try:
-            self.is_paused = not self.is_paused
-            if self.is_paused:
-                self.pause_button.setText("Resume")
-                logging.info("Processing paused by user")
-            else:
-                self.pause_button.setText("Pause")
-                logging.info("Processing resumed by user")
-        except Exception as e:
-            logging.error(f"Error toggling pause: {e}")
+        self.setLayout(layout)
+        self.resize(400, 120)
 
     def update_progress(self, value, text=None):
         try:
-            self.progress_bar.setValue(value)
+            self.progress_bar.setValue(max(0, value))
             if text:
                 self.label.setText(text)
         except Exception as e:
@@ -369,42 +137,6 @@ class ProgressDialog(QWidget):
     def closeEvent(self, event):
         event.ignore()
 
-class OutputModeDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Select Output Mode")
-        self.setWindowFlag(Qt.WindowStaysOnTopHint)
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
-
-        layout = QVBoxLayout()
-
-        label = QLabel("How would you like to save the results?")
-        layout.addWidget(label)
-
-        self.clipboard_checkbox = QCheckBox("Copy to Clipboard")
-        self.clipboard_checkbox.setChecked(True)
-        layout.addWidget(self.clipboard_checkbox)
-
-        self.pdf_checkbox = QCheckBox("Save as PDF")
-        layout.addWidget(self.pdf_checkbox)
-
-        # Buttons
-        button_layout = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        ok_button.clicked.connect(self.accept)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(ok_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
-
-        self.setLayout(layout)
-        self.resize(300, 150)
-
-    def get_selection(self):
-        """Return tuple (clipboard, pdf)"""
-        return (self.clipboard_checkbox.isChecked(), self.pdf_checkbox.isChecked())
 
 def show_error_popup(message):
     logging.error(f"Displaying error popup: {message}")
@@ -412,145 +144,15 @@ def show_error_popup(message):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Critical)
         msg.setText(message)
-        msg.setWindowTitle("DICOM Aggregator - Error")
+        msg.setWindowTitle("Study Aggregator - Error")
         if os.path.exists(icon_path):
             msg.setWindowIcon(QIcon(icon_path))
-        else:
-            logging.warning(f"Icon file not found at {icon_path}, not setting window icon for error popup.")
         msg.setWindowFlag(Qt.WindowStaysOnTopHint)
         msg.exec_()
     except Exception as e:
-        logging.error(f"Failed to show error popup: {e}", exc_info=True)
-        # Fallback to console output
+        logging.error(f"Failed to show error popup: {e}")
         print(f"ERROR: {message}", file=sys.stderr)
 
-# REMOVED - generate_markdown_report - Not needed, only using bd.pdf template for PDF generation
-
-def save_patient_data_as_pdf(patient_data, save_path):
-    """Generate a PDF for a single patient using bd.pdf template"""
-    try:
-        if not save_path.lower().endswith('.pdf'):
-            save_path = save_path + '.pdf'
-
-        # Find bd.pdf template
-        if getattr(sys, 'frozen', False):
-            base_path = os.path.dirname(sys.executable)
-        else:
-            base_path = os.path.dirname(os.path.abspath(__file__))
-
-        template_path = os.path.join(base_path, 'bd.pdf')
-
-        if not os.path.exists(template_path):
-            logging.error(f"Template bd.pdf not found at {template_path}")
-            show_error_popup(f"Template bd.pdf not found. Cannot generate PDF.")
-            return None
-
-        # Extract patient name
-        patient_name = patient_data.get('patient_name', 'Unknown')
-        if patient_name:
-            patient_name = patient_name.title()
-
-        # Build study lines
-        studies = []
-        studies_dict = patient_data.get('studies', {})
-
-        sorted_studies = sorted(studies_dict.values(),
-                                key=lambda x: (x.get('study_date', 'Unknown'),
-                                               x.get('study_description', '')))
-
-        for study in sorted_studies:
-            study_date = study.get('study_date', 'Unknown')
-            study_desc = study.get('study_description', 'Unknown Study')
-            series_count = len(study.get('all_series', set()))
-
-            if study_date and study_date != 'Unknown':
-                study_date = study_date.replace('-', '/')
-
-            if study_desc:
-                study_desc = study_desc.title()
-
-            if series_count > 0:
-                study_line = f"{study_date}, {study_desc} ({series_count} series)"
-            else:
-                study_line = f"{study_date}, {study_desc}"
-            studies.append(study_line)
-
-        logging.info(f"Generating PDF - Patient: {patient_name}, Studies: {len(studies)}")
-
-        _fill_pdf_form_fields(template_path, save_path, patient_name, studies)
-
-        if os.path.exists(save_path):
-            logging.info(f"PDF created at {save_path} ({os.path.getsize(save_path)} bytes)")
-            return save_path
-        else:
-            logging.error(f"PDF was not created at {save_path}")
-            return None
-
-    except Exception as e:
-        logging.error(f"Error saving PDF report: {e}", exc_info=True)
-        return None
-
-
-def _fill_pdf_form_fields(template_path, output_path, patient_name, studies):
-    """Fill PDF form fields — one patient per PDF, paginated across pages"""
-    try:
-        studies_per_page = 30
-        total_pages = max(1, (len(studies) + studies_per_page - 1) // studies_per_page)
-
-        logging.info(f"PDF pagination: {len(studies)} studies across {total_pages} page(s)")
-
-        temp_files = []
-
-        for page_num in range(total_pages):
-            start_idx = page_num * studies_per_page
-            end_idx = min(start_idx + studies_per_page, len(studies))
-            page_studies = studies[start_idx:end_idx]
-
-            studies_text = "\n".join(page_studies)
-
-            template_reader = PdfReader(template_path)
-            page_writer = PdfWriter()
-            page_writer.clone_document_from_reader(template_reader)
-
-            field_values = {
-                "Regarding": patient_name if patient_name else "",
-                "Location": "",
-                "WO#": "",
-                "Page": str(page_num + 1),
-                "Of": str(total_pages),
-                "List of Studies": studies_text
-            }
-
-            page_writer.update_page_form_field_values(
-                page_writer.pages[0],
-                field_values
-            )
-
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-            temp_files.append(temp_file.name)
-            page_writer.write(temp_file)
-            temp_file.close()
-
-        # Combine all pages into final output
-        final_writer = PdfWriter()
-        for temp_path in temp_files:
-            reader = PdfReader(temp_path)
-            final_writer.add_page(reader.pages[0])
-
-        with open(output_path, 'wb') as output_file:
-            final_writer.write(output_file)
-
-        for temp_path in temp_files:
-            try:
-                os.remove(temp_path)
-            except:
-                pass
-
-        logging.info(f"Created PDF with {total_pages} page(s)")
-
-    except Exception as e:
-        logging.error(f"Error filling PDF form fields: {e}", exc_info=True)
-        raise
 
 def show_success_popup(message):
     logging.info(f"Displaying success popup: {message}")
@@ -558,1397 +160,439 @@ def show_success_popup(message):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Information)
         msg.setText(message)
-        msg.setWindowTitle("DICOM Aggregator - Success")
+        msg.setWindowTitle("Study Aggregator - Success")
         if os.path.exists(icon_path):
             msg.setWindowIcon(QIcon(icon_path))
-        else:
-            logging.warning(f"Icon file not found at {icon_path}, not setting window icon for success popup.")
         msg.setWindowFlag(Qt.WindowStaysOnTopHint)
         msg.exec_()
     except Exception as e:
-        logging.error(f"Failed to show success popup: {e}", exc_info=True)
-        print(f"SUCCESS: {message}")
+        logging.error(f"Failed to show success popup: {e}")
 
-def is_valid_dicom_file(file_path):
-    try:
-        if not os.path.exists(file_path) or os.path.isdir(file_path):
-            return False
-            
-        # Skip PDF files and other common non-DICOM file types
-        file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext in ['.pdf', '.txt', '.exe', '.bat', '.inf', '.chm', '.log', '.xml', '.html']:
-            logging.debug(f"Skipping non-DICOM file type: {file_path}")
-            return False
-            
-        if os.path.getsize(file_path) < 132:
-            return False
-            
-        with open(file_path, 'rb') as f:
-            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                if len(mm) < 132:
-                    return False
-                mm.seek(128)
-                if mm.read(4) == b'DICM':
-                    return True
-    except IOError as e:
-        logging.debug(f"IOError/mmap error during quick check for {file_path}: {e}. Falling back to pydicom.")
-    except ValueError as e:
-        logging.debug(f"ValueError (mmap) during quick check for {file_path}: {e}. Falling back to pydicom.")
-    except Exception as e:
-        logging.debug(f"Unexpected error during mmap check for {file_path}: {e}. Falling back to pydicom.")
-        
-    try:
-        pydicom.dcmread(file_path, force=True, stop_before_pixels=True)
-        return True
-    except Exception as e:
-        logging.debug(f"Pydicom could not read {file_path} as DICOM: {e}")
-        return False
 
-def normalize_name(name):
-    """Normalize patient name for matching"""
-    try:
-        if not name or name == "Unknown":
-            return None
-        
-        # Remove common separators and extra spaces
-        name = str(name).replace("^", " ").replace(",", " ").replace("_", " ")
-        name = " ".join(name.split())  # Remove extra whitespace
-        
-        # Split into parts and sort to handle "LAST FIRST" vs "FIRST LAST"
-        parts = [part.strip().upper() for part in name.split() if part.strip()]
-        if len(parts) >= 2:
-            return tuple(sorted(parts))  # Return sorted tuple for matching
-        return tuple(parts) if parts else None
-    except Exception as e:
-        logging.warning(f"Error normalizing name '{name}': {e}")
-        return None
-
-def names_match(name1, name2):
-    """Check if two names likely refer to the same person"""
-    try:
-        norm1 = normalize_name(name1)
-        norm2 = normalize_name(name2)
-        
-        if norm1 is None or norm2 is None:
-            return False
-        
-        return norm1 == norm2
-    except Exception as e:
-        logging.warning(f"Error matching names '{name1}' and '{name2}': {e}")
-        return False
-
-@lru_cache(maxsize=10000)
-def extract_study_info(dicom_file):
-    try:
-        if os.path.getsize(dicom_file) < 132:
-            logging.debug(f"File {dicom_file} too small to be DICOM.")
-            return None
-
-        ds = pydicom.dcmread(dicom_file, force=True, specific_tags=[
-            "StudyDate", "StudyDescription", "SeriesDescription", "Modality",
-            "PatientName", "PatientBirthDate", "PatientID", "StudyInstanceUID",
-            "SeriesInstanceUID", "SeriesNumber", "ProtocolName",
-            "RequestedProcedureDescription", "StudyComments",
-            "InstitutionName", "InstitutionAddress", "InstitutionalDepartmentName"
-        ], stop_before_pixels=True)
-
-        patient_id = str(ds.get("PatientID", "")).strip()
-        study_date = str(ds.get("StudyDate", "")).strip()
-        study_description = str(ds.get("StudyDescription", "")).strip()
-        series_description = str(ds.get("SeriesDescription", "")).strip()
-        modality = str(ds.get("Modality", "")).strip()
-        study_instance_uid = str(ds.get("StudyInstanceUID", "")).strip()
-        series_instance_uid = str(ds.get("SeriesInstanceUID", "")).strip()
-        series_number = str(ds.get("SeriesNumber", "")).strip()
-        
-        # Get additional fields that might contain useful study information
-        protocol_name = str(ds.get("ProtocolName", "")).strip()
-        requested_procedure = str(ds.get("RequestedProcedureDescription", "")).strip()
-        study_comments = str(ds.get("StudyComments", "")).strip()
-
-        # Normalize patient name
-        patient_name_raw = ds.get("PatientName", "")
-        patient_name = str(patient_name_raw).replace("^", " ").strip()
-        patient_name = " ".join(patient_name.split()) if patient_name else "Unknown"
-
-        # Format DOB to MM-DD-YYYY
-        patient_dob = str(ds.get("PatientBirthDate", "")).strip()
-        if len(patient_dob) == 8:
-            patient_dob = f"{patient_dob[4:6]}-{patient_dob[6:8]}-{patient_dob[0:4]}"
-        else:
-            patient_dob = "Unknown"
-
-        # Format StudyDate to MM-DD-YYYY
-        if len(study_date) == 8:
-            study_date = f"{study_date[4:6]}-{study_date[6:8]}-{study_date[0:4]}"
-        else:
-            study_date = "Unknown"
-
-        # Build base description (study level) with improved logic
-        base_description = None
-        
-        # Priority order for study description:
-        # 1. StudyDescription (if meaningful)
-        # 2. RequestedProcedureDescription (often contains procedure details)
-        # 3. ProtocolName (imaging protocol)
-        # 4. SeriesDescription (as fallback)
-        # 5. Modality + "Study" (last resort)
-        
-        if study_description and study_description.lower() not in ['study', 'unknown', '']:
-            base_description = study_description
-        elif requested_procedure and requested_procedure.lower() not in ['unknown', '']:
-            # Clean up procedure codes and make more readable
-            base_description = requested_procedure
-            # Remove common prefixes like CPT codes
-            if base_description.startswith(('73110', '73100', '73120', '73130')):
-                # Extract the meaningful part after the code
-                parts = base_description.split(' ', 1)
-                if len(parts) > 1:
-                    base_description = parts[1].title()
-        elif protocol_name and protocol_name.lower() not in ['unknown', '']:
-            base_description = protocol_name
-        elif series_description and series_description.lower() not in ['unknown', 'series', '']:
-            # Use series description but indicate it's from series level
-            base_description = f"{series_description} Study"
-        elif modality:
-            base_description = f"{modality} Study"
-        else:
-            base_description = "Study"
-        
-        # Clean up the description
-        if base_description:
-            # Remove redundant words and clean up
-            base_description = base_description.replace("  ", " ").strip()
-            # Capitalize first letter of each word for consistency
-            base_description = base_description.title()
-        
-        # Build series description
-        if series_description:
-            series_desc = series_description
-        else:
-            series_desc = f"Series {series_number}" if series_number else "Unknown Series"
-
-        # Extract facility/institution information
-        institution_name = str(ds.get("InstitutionName", "")).strip()
-        institution_address = str(ds.get("InstitutionAddress", "")).strip()
-        department_name = str(ds.get("InstitutionalDepartmentName", "")).strip()
-
-        # Return raw data for study/series grouping
-        result = {
-            'patient_id': patient_id or None,
-            'patient_name': patient_name,
-            'patient_dob': patient_dob,
-            'study_date': study_date,
-            'study_description': base_description,
-            'series_description': series_desc,
-            'modality': modality,
-            'study_instance_uid': study_instance_uid or None,
-            'series_instance_uid': series_instance_uid or None,
-            'series_number': series_number or None,
-            'institution_name': institution_name or None,
-            'institution_address': institution_address or None,
-            'department_name': department_name or None
-        }
-        
-        # Add more detailed logging for debugging
-        logging.debug(f"Processed {os.path.basename(dicom_file)}: "
-                     f"Patient='{patient_name}', Study='{base_description}', "
-                     f"Original StudyDesc='{study_description}', "
-                     f"ReqProc='{requested_procedure}', Protocol='{protocol_name}'")
-        
-        return result
-
-    except pydicom.errors.InvalidDicomError as e:
-        logging.warning(f"Invalid DICOM file {dicom_file}: {e}")
-        return None
-    except Exception as e:
-        error_type = type(e).__name__
-        if "encryption" in str(e).lower() or "proprietary" in str(e).lower():
-            logging.warning(f"Proprietary/encrypted DICOM file {dicom_file}: {e}")
-        else:
-            logging.warning(f"Failed to extract study info from {dicom_file} ({error_type}): {e}")
-        return None
-
-def get_password_from_gui(parent_widget, description_text):
-    try:
-        password, ok = QInputDialog.getText(parent_widget, 'Password Required', 
-                                            f'Enter password for {description_text}:', 
-                                            QLineEdit.Password)
-        if ok and password:
-            return password.encode('utf-8')
-        elif ok and not password:
-            return b'' 
-        return None
-    except Exception as e:
-        logging.error(f"Error getting password from GUI: {e}")
-        return None
-
-def process_dicom_file(file_path):
-    try:
-        if is_valid_dicom_file(file_path):
-            return extract_study_info(file_path), file_path
-    except Exception as e:
-        logging.error(f"Unexpected error in process_dicom_file for {file_path}: {e}", exc_info=True)
-    return None
-
-def detect_zip_encryption_type(zip_path):
-    """Detect if zip uses traditional or AES encryption"""
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            for zinfo in zf.infolist():
-                if zinfo.flag_bits & 0x1:  # Encrypted
-                    # Try to determine if it's AES by looking at extra field
-                    if zinfo.extra:
-                        # AES encryption typically has specific extra field signatures
-                        if b'\x01\x99' in zinfo.extra:  # AES extra field signature
-                            return "aes"
-                    return "traditional"
-            return "none"
-    except zipfile.BadZipFile as e:
-        logging.error(f"Bad zip file {zip_path}: {e}")
-        return "corrupted"
-    except Exception as e:
-        logging.error(f"Error detecting encryption type for {zip_path}: {e}")
-        return "unknown"
-
-def extract_with_7zip(zip_path, extract_to, password=None):
-    """Extract zip file using 7zip"""
-    if not SEVEN_ZIP_PATH:
-        return False
-    
-    try:
-        cmd = [SEVEN_ZIP_PATH, 'x', zip_path, f'-o{extract_to}', '-y']
-        if password:
-            cmd.append(f'-p{password.decode("utf-8")}')
-        
-        logging.info(f"Extracting with 7zip: {' '.join(cmd[:-1])}{'[password]' if password else ''}")
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        
-        if result.returncode == 0:
-            logging.info(f"7zip extraction successful for {zip_path}")
-            return True
-        else:
-            logging.warning(f"7zip extraction failed for {zip_path}: {result.stderr}")
-            if "wrong password" in result.stderr.lower():
-                raise Exception("WRONG_PASSWORD")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        logging.error(f"7zip extraction timed out for {zip_path}")
-        return False
-    except Exception as e:
-        logging.error(f"7zip extraction error for {zip_path}: {e}")
-        if "WRONG_PASSWORD" in str(e):
-            raise
-        return False
-
-def process_zip_file(zip_path, password=None, max_workers=None, progress_callback=None, nested_level=0, max_nested_level=5):
-    found_studies = []
-    if nested_level > max_nested_level:
-        logging.warning(f"Maximum nested level ({max_nested_level}) reached for {zip_path}, skipping.")
-        return found_studies
-    
-    try:
-        temp_dir = tempfile.mkdtemp(prefix="dicom_agg_")
-        logging.info(f"Extracting {zip_path} to temp dir: {temp_dir}")
-    except Exception as e:
-        logging.error(f"Failed to create temporary directory: {e}")
-        if progress_callback:
-            progress_callback(0, f"Error creating temp dir for {os.path.basename(zip_path)}")
-        return found_studies
-
-    if progress_callback:
-        prefix = "  " * nested_level
-        progress_callback(0, f"{prefix}Extracting {os.path.basename(zip_path)}...")
-    
-    extraction_successful = False
-    encryption_type = detect_zip_encryption_type(zip_path)
-    
-    if encryption_type == "corrupted":
-        if progress_callback:
-            progress_callback(100, f"Skipping corrupted zip: {os.path.basename(zip_path)}")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return found_studies
-    
-    try:
-        if encryption_type == "none":
-            # No encryption, use standard zipfile
-            logging.info(f"Extracting unencrypted zip: {zip_path}")
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(temp_dir)
-            extraction_successful = True
-            
-        elif encryption_type in ["traditional", "aes", "unknown"] and password is not None:
-            # Try 7zip first for better performance
-            if SEVEN_ZIP_PATH:
-                try:
-                    if extract_with_7zip(zip_path, temp_dir, password):
-                        extraction_successful = True
-                    else:
-                        logging.info("7zip failed, falling back to pyzipper")
-                except Exception as e:
-                    if "WRONG_PASSWORD" in str(e):
-                        raise Exception("WRONG_PASSWORD")
-                    logging.info("7zip failed, falling back to pyzipper")
-            
-            # Fallback to pyzipper if 7zip failed or not available
-            if not extraction_successful:
-                logging.info(f"Using pyzipper for encrypted zip: {zip_path}")
-                try:
-                    if encryption_type == "traditional":
-                        with zipfile.ZipFile(zip_path, 'r') as zf:
-                            zf.extractall(temp_dir, pwd=password)
-                    else:  # AES or unknown
-                        with pyzipper.AESZipFile(zip_path) as zf:
-                            zf.extractall(temp_dir, pwd=password)
-                    extraction_successful = True
-                except (RuntimeError, pyzipper.zipfile.BadZipFile) as e:
-                    if "wrong password" in str(e).lower() or "WRONG_PASSWORD" in str(e).upper():
-                        raise Exception("WRONG_PASSWORD")
-                    logging.error(f"Pyzipper extraction failed: {e}")
-                    
-        else:
-            # Encrypted but no password provided
-            logging.warning(f"Zip file {zip_path} is encrypted, but no password was provided. Skipping extraction.")
-            if progress_callback: 
-                progress_callback(25, f"{prefix}Skipping encrypted {os.path.basename(zip_path)} (no password).")
-
-    except Exception as e:
-        if "WRONG_PASSWORD" in str(e):
-            raise Exception("WRONG_PASSWORD")
-        logging.error(f"Extraction failed for {zip_path}: {e}", exc_info=True)
-
-    if not extraction_successful:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        logging.warning(f"Extraction failed for {zip_path}, cleaned up temp_dir.")
-        return found_studies
-            
-    logging.info(f"Processing files from extracted {zip_path}...")
-    if progress_callback:
-        prefix = "  " * nested_level
-        progress_callback(25, f"{prefix}Processing files from {os.path.basename(zip_path)}...")
-    
-    # Process nested zips
-    nested_zip_files = []
-    for root, _, files in os.walk(temp_dir):
-        for file in files:
-            if file.lower().endswith('.zip'):
-                nested_zip_files.append(os.path.join(root, file))
-    
-    if nested_zip_files:
-        logging.info(f"Found {len(nested_zip_files)} nested zip files in {zip_path}")
-        nested_progress_start, nested_progress_end = 25, 65
-        for i, nested_zip in enumerate(nested_zip_files):
-            if progress_callback:
-                prefix_nested_outer = "  " * nested_level
-                nested_progress_val = nested_progress_start + (i / len(nested_zip_files) * (nested_progress_end - nested_progress_start))
-                progress_callback(int(nested_progress_val), f"{prefix_nested_outer}Processing nested zip {i+1}/{len(nested_zip_files)}: {os.path.basename(nested_zip)}")
-            def nested_progress_callback(percent, text):
-                if progress_callback and percent >= 0:
-                    range_size = (nested_progress_end - nested_progress_start) / len(nested_zip_files)
-                    start_pos = nested_progress_start + (i * range_size)
-                    scaled_percent = start_pos + (percent / 100) * range_size
-                    prefix_nested_inner = "  " * (nested_level + 1)
-                    progress_callback(int(scaled_percent), f"{prefix_nested_inner}{text}")
-            nested_studies = process_zip_file(nested_zip, password, max_workers, nested_progress_callback, nested_level + 1, max_nested_level)
-            found_studies.extend(nested_studies)
-    
-    # Process DICOM files
-    progress_start_dicom = 65 if nested_zip_files else 25
-    dicom_files = []
-    for root, _, files in os.walk(temp_dir):
-        for file in files:
-            if file.lower().endswith('.zip'): continue
-            file_path = os.path.join(root, file)
-            ext = os.path.splitext(file)[1].lower()
-            if ext in ('.dcm', '.ima', '.dicom', '') or not ext or ext.lstrip('.').isdigit():
-                dicom_files.append(file_path)
-    
-    logging.info(f"Found {len(dicom_files)} potential DICOM files in extracted {zip_path}")
-    valid_dicom_count = 0
-    
-    if dicom_files:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            batch_size = min(100, len(dicom_files)) if len(dicom_files) > 0 else 1
-            num_batches = (len(dicom_files) + batch_size -1) // batch_size
-            for batch_idx in range(num_batches):
-                if progress_callback:
-                    progress_percent = progress_start_dicom + ((batch_idx / num_batches) * (100 - progress_start_dicom))
-                    prefix_dicom = "  " * nested_level
-                    progress_callback(int(progress_percent), f"{prefix_dicom}Processing {os.path.basename(zip_path)}: batch {batch_idx+1}/{num_batches}...")
-                
-                start_idx = batch_idx * batch_size
-                end_idx = start_idx + batch_size
-                batch = dicom_files[start_idx:end_idx]
-                futures = {executor.submit(process_dicom_file, f): f for f in batch}
-                for future in concurrent.futures.as_completed(futures):
-                    result = future.result()
-                    if result:
-                        study_info, file_path = result
-                        if study_info:
-                            study_info['source_path'] = zip_path
-                            found_studies.append(study_info)
-                            valid_dicom_count += 1
-    
-    logging.info(f"Found {valid_dicom_count} valid DICOM studies in {zip_path}")
-    if progress_callback:
-        progress_callback(100, f"{'  ' * nested_level}Completed processing {os.path.basename(zip_path)}")
-    
-    try:
-        shutil.rmtree(temp_dir)
-        logging.info(f"Successfully removed temp directory: {temp_dir}")
-    except Exception as e:
-        logging.error(f"Error removing temp directory {temp_dir}: {e}")
-
-    # Strategic garbage collection after processing each ZIP
-    gc.collect()
-
-    return found_studies
-
-# REMOVED - find_zip_files - Functionality inlined in ProcessingThread.extract_directory_info()
-
-def is_patient_all_unknown(patient_data):
-    """Check if a patient has all unknown/empty identifying information"""
-    try:
-        patient_id = patient_data.get('patient_id')
-        patient_name = patient_data.get('patient_name', 'Unknown')
-        patient_dob = patient_data.get('patient_dob', 'Unknown')
-        
-        # Consider empty strings as unknown too
-        id_unknown = not patient_id or patient_id.strip() == ''
-        name_unknown = not patient_name or patient_name.strip() == '' or patient_name.strip() == 'Unknown'
-        dob_unknown = not patient_dob or patient_dob.strip() == '' or patient_dob.strip() == 'Unknown'
-        
-        return id_unknown and name_unknown and dob_unknown
-    except Exception as e:
-        logging.warning(f"Error checking if patient is all unknown: {e}")
-        return False
-
-def merge_patients(studies_list):
-    """Merge studies from the same patient based on ID and name matching, group by study and series"""
-    patients = {}
-    
-    logging.info(f"Starting merge_patients with {len(studies_list)} studies")
-    
-    if not studies_list:
-        logging.warning("No studies provided to merge_patients")
-        return patients
-    
-    for i, study in enumerate(studies_list):
-        if not study or not isinstance(study, dict):
-            logging.warning(f"Invalid study data at index {i}: {study}")
-            continue
-            
-        try:
-            patient_id = study.get('patient_id')
-            patient_name = study.get('patient_name', 'Unknown')
-            patient_dob = study.get('patient_dob', 'Unknown')
-            study_desc = study.get('study_description', 'Unknown')
-            
-            # Log problematic entries with source file information
-            if patient_name == 'Unknown' or study_desc in ['Study', 'Unknown']:
-                source_file = study.get('source_path', 'Unknown source')
-                logging.warning(f"Study {i} has missing data from {source_file} - Name: '{patient_name}', "
-                              f"StudyDesc: '{study_desc}', ID: '{patient_id}', DOB: '{patient_dob}'")
-            
-            # Find matching patient
-            matched_key = None
-            
-            # First, try to match by Patient ID
-            if patient_id:
-                for key in patients.keys():
-                    if patients[key].get('patient_id') == patient_id:
-                        matched_key = key
-                        break
-            
-            # If no ID match, try name matching
-            if not matched_key:
-                for key in patients.keys():
-                    if names_match(patient_name, patients[key].get('patient_name')):
-                        # Check for DOB conflicts (both real but different)
-                        existing_dob = patients[key].get('patient_dob', 'Unknown')
-                        if (patient_dob != 'Unknown' and existing_dob != 'Unknown' and 
-                            patient_dob != existing_dob):
-                            # DOB conflict - don't merge, will create separate entry
-                            continue
-                        matched_key = key
-                        break
-            
-            if matched_key:
-                # Merge with existing patient
-                existing = patients[matched_key]
-
-                # Update DOB if current study has one and existing doesn't
-                if patient_dob != 'Unknown' and existing.get('patient_dob') == 'Unknown':
-                    existing['patient_dob'] = patient_dob
-
-                # Update facility information if available and not already set
-                if not existing.get('institution_name') and study.get('institution_name'):
-                    existing['institution_name'] = study.get('institution_name')
-                if not existing.get('institution_address') and study.get('institution_address'):
-                    existing['institution_address'] = study.get('institution_address')
-                if not existing.get('department_name') and study.get('department_name'):
-                    existing['department_name'] = study.get('department_name')
-            else:
-                # Create new patient entry
-                patient_key = f"{patient_name}_{patient_dob}_{patient_id or 'NO_ID'}"
-                patients[patient_key] = {
-                    'patient_id': patient_id,
-                    'patient_name': patient_name,
-                    'patient_dob': patient_dob,
-                    'studies': {},
-                    'institution_name': study.get('institution_name'),
-                    'institution_address': study.get('institution_address'),
-                    'department_name': study.get('department_name')
-                }
-                matched_key = patient_key
-                logging.debug(f"Created new patient entry: {patient_key}")
-            
-            # Group by study first
-            patient_data = patients[matched_key]
-            study_uid = study.get('study_instance_uid') or f"{study.get('study_date', 'Unknown')}_{study.get('study_description', 'Unknown')}"
-            
-            if study_uid not in patient_data['studies']:
-                patient_data['studies'][study_uid] = {
-                    'study_date': study.get('study_date', 'Unknown'),
-                    'study_description': study.get('study_description', 'Unknown'),
-                    'all_series': set()  # Track all series in this study regardless of modality
-                }
-            
-            # Track all series within the study (regardless of modality)
-            series_uid = study.get('series_instance_uid') or f"{study.get('series_number', 'Unknown')}_{study.get('series_description', 'Unknown')}"
-            patient_data['studies'][study_uid]['all_series'].add(series_uid)
-            
-        except Exception as e:
-            logging.error(f"Error processing study {i}: {e}", exc_info=True)
-            continue
-    
-    # Filter out patients with all unknown identifying information
-    patients_before_filter = len(patients)
-    patients = {k: v for k, v in patients.items() if not is_patient_all_unknown(v)}
-    patients_after_filter = len(patients)
-    
-    if patients_before_filter > patients_after_filter:
-        filtered_count = patients_before_filter - patients_after_filter
-        logging.info(f"Filtered out {filtered_count} patients with all unknown identifying information")
-    
-    # Log final patient summary
-    for patient_key, patient_data in patients.items():
-        study_count = len(patient_data['studies'])
-        logging.info(f"Patient '{patient_data.get('patient_name')}' (ID: {patient_data.get('patient_id')}) "
-                    f"has {study_count} studies")
-    
-    return patients
+# --- Processing Thread (Rust engine subprocess) ---
 
 class ProcessingThread(QThread):
     progress_updated = pyqtSignal(int, str)
     finished_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
+    set_busy = pyqtSignal()
+    set_normal = pyqtSignal()
 
-    def __init__(self, input_path, max_workers, progress_dialog=None):
+    def __init__(self, input_path, engine_path, progress_dialog=None):
         super().__init__()
         self.input_path = input_path
-        self.max_workers = max_workers
-        self.max_nested_level = 5
+        self.engine_path = engine_path
         self.progress_dialog = progress_dialog
-
-    def check_pause(self):
-        """Check if processing is paused and wait until resumed"""
-        if self.progress_dialog:
-            while self.progress_dialog.is_paused:
-                time.sleep(0.1)  # Check every 100ms
+        self._password_b64 = None
 
     def run(self):
         try:
-            set_busy_cursor()
-            
-            # Add debugging for CD drive issues
-            logging.info(f"ProcessingThread starting with path: '{self.input_path}'")
-            logging.info(f"Path type: {'File' if os.path.isfile(self.input_path) else 'Directory' if os.path.isdir(self.input_path) else 'Unknown'}")
-            logging.info(f"Path accessible: {os.path.exists(self.input_path)}")
-            
-            # Check drive type for additional debugging
-            if len(self.input_path) >= 2 and self.input_path[1] == ':':
-                drive_letter = self.input_path[0].upper()
-                logging.info(f"Processing drive: {drive_letter}:")
-                
-                # Try to get drive type (Windows specific)
-                try:
-                    import ctypes
-                    drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive_letter}:\\")
-                    drive_types = {0: "Unknown", 1: "Invalid", 2: "Removable", 3: "Fixed", 4: "Network", 5: "CD-ROM", 6: "RAM"}
-                    logging.info(f"Drive type: {drive_types.get(drive_type, 'Unknown')} ({drive_type})")
-                except Exception as e:
-                    logging.warning(f"Could not determine drive type: {e}")
-            
-            all_studies = []
-            
-            if os.path.isfile(self.input_path) and self.input_path.lower().endswith('.zip'):
-                self.progress_updated.emit(0, f"Processing zip file: {os.path.basename(self.input_path)}")
-                encryption_type = detect_zip_encryption_type(self.input_path)
-                thread_password = None
-                
-                if encryption_type == "corrupted":
-                    self.error_signal.emit(f"The ZIP file appears to be corrupted or damaged: {os.path.basename(self.input_path)}. Please verify the file integrity.")
-                    reset_cursor()
-                    return
-                
-                if encryption_type != "none":
-                    self.progress_updated.emit(-1, "Password")
-                    password_attr_set = False
-                    logging.debug("Waiting for password attribute for single zip...")
-                    wait_start_time = time.time()
-                    while not password_attr_set and (time.time() - wait_start_time < 600):
-                        if hasattr(self, 'password_from_gui'):
-                            thread_password = self.password_from_gui
-                            del self.password_from_gui
-                            password_attr_set = True
-                            logging.debug("Password attribute received for single zip")
-                        else:
-                            time.sleep(0.1)
-                    if not password_attr_set:
-                        logging.error("Timeout or failure waiting for password for single zip.")
-                        self.error_signal.emit("Password input timed out. Please try again.")
-                        reset_cursor()
-                        return
-                
-                try:
-                    study_data = process_zip_file(self.input_path, thread_password, self.max_workers,
-                                                lambda p, t: self.progress_updated.emit(p, t),
-                                                0, self.max_nested_level)
-                    all_studies.extend(study_data)
-                except Exception as e:
-                    if "WRONG_PASSWORD" in str(e):
-                        self.error_signal.emit("Incorrect password provided for the encrypted ZIP file. Please check your password and try again.")
-                    else:
-                        error_msg = handle_critical_error(e, "ZIP file processing")
-                        self.error_signal.emit(error_msg)
-                    reset_cursor()
-                    return
-                    
-            elif os.path.isdir(self.input_path):
-                self.progress_updated.emit(0, f"Processing directory: {os.path.basename(self.input_path)}")
-                try:
-                    all_studies = self.extract_directory_info()
-                except Exception as e:
-                    error_msg = handle_critical_error(e, "directory processing")
-                    self.error_signal.emit(error_msg)
-                    reset_cursor()
-                    return
-            else:
-                err_msg = f"Invalid input: '{self.input_path}' is not a valid directory or ZIP file."
-                logging.error(err_msg)
-                self.error_signal.emit(err_msg)
-                reset_cursor()
-                return
-            
-            try:
-                logging.debug(f"Processing complete. Found {len(all_studies)} total studies.")
-                
-                if not all_studies:
-                    self.error_signal.emit("No DICOM studies found in the specified location. Please verify that the source contains valid DICOM files and try again.")
-                    reset_cursor()
-                    return
-                
-                # Filter out any None entries
-                valid_studies = [s for s in all_studies if s is not None]
-                
-                if not valid_studies:
-                    self.error_signal.emit("No valid DICOM studies could be processed. The files may be corrupted, encrypted with proprietary encryption, or not contain standard DICOM headers.")
-                    reset_cursor()
-                    return
-                
-                merged_patients = merge_patients(valid_studies)
-                
-                if not merged_patients:
-                    self.error_signal.emit("Unable to aggregate DICOM studies: All extracted data contains insufficient patient identification information. Please manually inspect the source files to verify they contain valid DICOM headers with patient details.")
-                    reset_cursor()
-                    return
-                
-                logging.debug(f"Merged into {len(merged_patients)} unique patients.")
-                self.finished_signal.emit(merged_patients)
-                logging.debug("Finished signal emitted successfully.")
-                
-            except Exception as emit_err:
-                error_msg = handle_critical_error(emit_err, "data processing")
-                logging.error(f"Failed to process study data: {emit_err}", exc_info=True)
-                self.error_signal.emit(error_msg)
-                reset_cursor()
-                
+            self.set_busy.emit()
+            self._run_engine(password_b64=None)
         except Exception as e:
             error_msg = handle_critical_error(e, "processing thread")
-            logging.error(f"Critical error in ProcessingThread: {e}", exc_info=True)
             self.error_signal.emit(error_msg)
         finally:
-            reset_cursor()
-            
-    def extract_directory_info(self):
-        all_studies = []
-        self.progress_updated.emit(0, "Scanning directory...")
+            self.set_normal.emit()
 
-        # Single pass directory traversal - collect all files at once
-        zip_files = []
-        all_potential_dicom_files = []
-        total_files_scanned = 0
+    def _run_engine(self, password_b64=None):
+        cmd = [self.engine_path, self.input_path]
+
+        if password_b64:
+            cmd.extend(['--password', password_b64])
+
+        logging.info(f"Running engine: {' '.join(cmd[:2])} ...")
 
         try:
-            for root, dirs, files in os.walk(self.input_path):
-                dirs[:] = [d for d in dirs if not d.startswith('.')]  # Skip hidden directories
-                for file_name in files:
-                    total_files_scanned += 1
-                    file_path = os.path.join(root, file_name)
-                    file_lower = file_name.lower()
-
-                    if file_lower.endswith('.zip'):
-                        zip_files.append(file_path)
-                    else:
-                        # Check if it could be a DICOM file
-                        ext = os.path.splitext(file_name)[1].lower()
-                        if ext in ('.dcm', '.ima', '.dicom', '') or not ext or ext.lstrip('.').isdigit():
-                            all_potential_dicom_files.append(file_path)
-
-                    # Update progress every 500 files during scan
-                    if total_files_scanned % 500 == 0:
-                        self.progress_updated.emit(0, f"Scanning directory... ({total_files_scanned} files found)")
-
-            logging.info(f"Directory scan complete: {len(zip_files)} ZIP files, {len(all_potential_dicom_files)} potential DICOM files")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
         except Exception as e:
-            logging.error(f"Error scanning directory: {e}")
+            self.error_signal.emit(f"Failed to start engine: {e}")
+            return
 
-        thread_shared_password = None
+        engine_errors = []
 
-        # Process ZIP files if found
-        if zip_files:
-            self.progress_updated.emit(5, f"Found {len(zip_files)} zip files. Checking for encryption...")
-            password_needed_flags = {}
-            any_zip_needs_password = False
-            
-            for i, zip_path_check in enumerate(zip_files):
-                try:
-                    encryption_type = detect_zip_encryption_type(zip_path_check)
-                    is_needed = encryption_type not in ["none", "corrupted"]
-                    password_needed_flags[zip_path_check] = is_needed
-                    if is_needed: any_zip_needs_password = True
-                    self.progress_updated.emit(5 + int((i / len(zip_files)) * 10), f"Checking zip file {i+1}/{len(zip_files)}...")
-                except Exception as e_check:
-                    logging.warning(f"Could not determine password status for {zip_path_check}: {e_check}. Assuming needed.")
-                    password_needed_flags[zip_path_check] = True
-                    any_zip_needs_password = True
-            
-            if any_zip_needs_password:
-                self.progress_updated.emit(-1, "Password")
-                shared_password_attr_set = False
-                logging.debug("Waiting for shared_password attribute for directory...")
-                wait_start_time = time.time()
-                while not shared_password_attr_set and (time.time() - wait_start_time < 600):
-                    if hasattr(self, 'shared_password_from_gui'):
-                        thread_shared_password = self.shared_password_from_gui
-                        del self.shared_password_from_gui
-                        shared_password_attr_set = True
-                        logging.debug(f"Shared_password attribute received: {'Yes' if thread_shared_password is not None else 'No/Cancelled'}")
-                    else:
-                        time.sleep(0.1)
-                if not shared_password_attr_set:
-                    logging.error("Timeout or failure waiting for shared password.")
-            
-            # Process ZIP files (use 60% of progress for ZIPs)
-            for i, zip_path_process in enumerate(zip_files):
-                self.check_pause()  # Check if paused before processing each ZIP
-                current_zip_password_to_use = thread_shared_password if password_needed_flags.get(zip_path_process, False) else None
-                progress_start_zip = 15 + int((i / len(zip_files)) * 45)  # 15-60%
-                progress_end_zip = 15 + int(((i + 1) / len(zip_files)) * 45)
-                def zip_progress_callback(percent, text):
-                    if percent >= 0:
-                        scaled_percent = progress_start_zip + int((percent / 100) * (progress_end_zip - progress_start_zip))
-                        self.progress_updated.emit(scaled_percent, text)
-                try:
-                    self.progress_updated.emit(progress_start_zip, f"Processing zip {i+1}/{len(zip_files)}: {os.path.basename(zip_path_process)}")
-                    found_studies_in_zip = process_zip_file(zip_path_process, current_zip_password_to_use, self.max_workers,
-                                                            zip_progress_callback, 0, self.max_nested_level)
-                    all_studies.extend(found_studies_in_zip)
-                except Exception as e_proc:
-                    if "WRONG_PASSWORD" in str(e_proc):
-                        logging.error(f"Wrong password for zip {zip_path_process}")
-                        self.progress_updated.emit(progress_end_zip, f"Wrong password for {os.path.basename(zip_path_process)}")
-                    else:
-                        logging.error(f"Error processing zip {zip_path_process} in directory: {e_proc}", exc_info=True)
-                        self.progress_updated.emit(progress_end_zip, f"Error with {os.path.basename(zip_path_process)}: {str(e_proc)[:50]}")
-        
-        # Process loose DICOM files (use remaining 40% of progress)
-        # Files were already collected during initial directory scan
-        progress_start_dicom = 60 if zip_files else 0
-        self.progress_updated.emit(progress_start_dicom, f"Found {len(all_potential_dicom_files)} potential loose DICOM files...")
-
-        logging.info(f"Found {len(all_potential_dicom_files)} potential loose DICOM files")
-        
-        # Validate and process loose DICOM files
-        dicom_files_confirmed = []
-        if all_potential_dicom_files:
-            self.progress_updated.emit(progress_start_dicom + 20, f"Validating {len(all_potential_dicom_files)} potential DICOM files...")
-            for i, pf_path in enumerate(all_potential_dicom_files):
-                # Check for pause every 10 files
-                if (i+1) % 10 == 0:
-                    self.check_pause()
-                    progress_val = progress_start_dicom + 20 + int(((i+1) / len(all_potential_dicom_files)) * 15)
-                    self.progress_updated.emit(progress_val, f"Validating DICOMs: {i+1}/{len(all_potential_dicom_files)}")
-                if is_valid_dicom_file(pf_path):
-                    dicom_files_confirmed.append(pf_path)
-        
-        logging.info(f"Found {len(dicom_files_confirmed)} valid loose DICOM files")
-        
-        if dicom_files_confirmed:
-            self.progress_updated.emit(progress_start_dicom + 35, f"Processing {len(dicom_files_confirmed)} loose DICOM files...")
-            processed_count = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {executor.submit(process_dicom_file, f): f for f in dicom_files_confirmed}
-                total_to_process = len(dicom_files_confirmed)
-                for future in concurrent.futures.as_completed(futures):
-                    processed_count += 1
-                    # Throttle progress updates to every 10 files
-                    if processed_count % 10 == 0 or processed_count == total_to_process:
-                        progress_val = progress_start_dicom + 35 + int((processed_count / total_to_process) * 25)
-                        self.progress_updated.emit(progress_val, f"Processing loose DICOMs: {processed_count}/{total_to_process}")
-                    result = future.result()
-                    if result:
-                        study_info, file_path_processed = result
-                        if study_info:
-                            study_info['source_path'] = file_path_processed
-                            all_studies.append(study_info)
-
-            # Strategic garbage collection after processing DICOM files
-            gc.collect()
-
-        self.progress_updated.emit(95, "Finalizing results from directory...")
-        logging.info(f"Total studies found: {len(all_studies)} (from ZIPs and loose files)")
-        return all_studies
-    
-def normalize_and_validate_path(input_path):
-    """Normalize path and handle CD/network drive issues"""
-    try:
-        # Log original path info
-        logging.info(f"Original input path: '{input_path}'")
-        logging.info(f"Path exists check: {os.path.exists(input_path)}")
-        logging.info(f"Path is absolute: {os.path.isabs(input_path)}")
-        logging.info(f"Current working directory: {os.getcwd()}")
-        
-        # Normalize the path
-        normalized_path = os.path.normpath(input_path)
-        logging.info(f"Normalized path: '{normalized_path}'")
-        
-        # Handle drive root case (like "H:\")
-        if len(normalized_path) == 3 and normalized_path.endswith(':\\'):
-            # It's a drive root, check if accessible
-            logging.info(f"Detected drive root: {normalized_path}")
-            
-            # Try to list directory contents to verify access
+        # Read stdout in a background thread to prevent pipe deadlock.
+        # The engine writes progress JSON to stderr and the final result
+        # JSON to stdout; if stdout fills its OS pipe buffer (64KB) before
+        # we read it, the engine blocks and never closes stderr.
+        import threading
+        stdout_chunks = []
+        def _drain_stdout():
             try:
-                contents = os.listdir(normalized_path)
-                logging.info(f"Drive root accessible, found {len(contents)} items")
+                stdout_chunks.append(process.stdout.read())
+            except Exception:
+                pass
+        stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+        stdout_thread.start()
+
+        for raw_line in process.stderr:
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+                msg_type = msg.get('type')
+
+                if msg_type == 'progress':
+                    pct = msg.get('percent', 0)
+                    text = msg.get('message', '')
+                    self.progress_updated.emit(max(0, pct), text)
+
+                elif msg_type == 'password_needed':
+                    self.progress_updated.emit(-1, "Password")
+                    wait_start = time.time()
+                    while not hasattr(self, '_password_received') and (time.time() - wait_start < 600):
+                        time.sleep(0.1)
+
+                    if hasattr(self, '_password_received'):
+                        pw_bytes = self._password_received
+                        del self._password_received
+
+                        if pw_bytes is None:
+                            self.error_signal.emit("Password input cancelled.")
+                            process.kill()
+                            stdout_thread.join(timeout=2)
+                            return
+
+                        process.kill()
+                        process.wait()
+                        stdout_thread.join(timeout=2)
+                        pw_b64 = base64.b64encode(pw_bytes).decode('ascii')
+                        self._run_engine(password_b64=pw_b64)
+                        return
+                    else:
+                        self.error_signal.emit("Password input timed out.")
+                        process.kill()
+                        stdout_thread.join(timeout=2)
+                        return
+
+                elif msg_type == 'error':
+                    err_msg = msg.get('message', 'Unknown engine error')
+                    logging.error(f"Engine error: {err_msg}")
+                    engine_errors.append(err_msg)
+
+            except json.JSONDecodeError:
+                logging.debug(f"Engine stderr: {line}")
+
+        stdout_thread.join(timeout=30)
+        stdout_data = b''.join(stdout_chunks)
+        exit_code = process.wait()
+
+        if exit_code == 2 and not password_b64:
+            self.progress_updated.emit(-1, "Password")
+            wait_start = time.time()
+            while not hasattr(self, '_password_received') and (time.time() - wait_start < 600):
+                time.sleep(0.1)
+
+            if hasattr(self, '_password_received'):
+                pw_bytes = self._password_received
+                del self._password_received
+                if pw_bytes:
+                    pw_b64 = base64.b64encode(pw_bytes).decode('ascii')
+                    self._run_engine(password_b64=pw_b64)
+                    return
+
+            self.error_signal.emit("Password required but not provided.")
+            return
+
+        if exit_code != 0:
+            if engine_errors:
+                self.error_signal.emit("\n".join(engine_errors))
+            else:
+                self.error_signal.emit(
+                    f"Processing failed (exit code {exit_code}). Check log for details."
+                )
+            return
+
+        try:
+            result = json.loads(stdout_data.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            self.error_signal.emit(f"Failed to parse engine output: {e}")
+            return
+
+        patients = result.get('patients', {})
+        stats = result.get('stats', {})
+
+        logging.info(
+            f"Engine completed: {stats.get('files_scanned', 0)} files scanned, "
+            f"{stats.get('dicom_valid', 0)} valid DICOM, "
+            f"{stats.get('patients_found', 0)} patients, "
+            f"{stats.get('elapsed_ms', 0)}ms"
+        )
+
+        if not patients:
+            self.error_signal.emit(
+                "No DICOM studies found in the specified location. "
+                "Please verify that the source contains valid DICOM files."
+            )
+            return
+
+        for patient in patients.values():
+            for study in patient.get('studies', {}).values():
+                study['all_series'] = set(study.get('all_series', []))
+
+        self.finished_signal.emit(patients)
+
+
+# --- Path Handling ---
+
+def normalize_and_validate_path(input_path):
+    try:
+        normalized_path = os.path.normpath(input_path)
+
+        if len(normalized_path) == 3 and normalized_path.endswith(':\\'):
+            try:
+                os.listdir(normalized_path)
                 return normalized_path
-            except (OSError, PermissionError) as e:
-                logging.error(f"Cannot access drive root {normalized_path}: {e}")
-                raise Exception(f"Cannot access drive {normalized_path}. Please ensure the drive is accessible and not write-protected.")
-        
-        # For other paths, ensure they exist and are accessible
+            except (OSError, PermissionError):
+                raise Exception(f"Cannot access drive {normalized_path}.")
+
         if not os.path.exists(normalized_path):
-            logging.error(f"Path does not exist: {normalized_path}")
             raise Exception(f"The specified path does not exist: '{normalized_path}'")
-        
-        # Test read access
+
         if os.path.isdir(normalized_path):
             try:
                 os.listdir(normalized_path)
-                logging.info("Directory access confirmed")
-            except (OSError, PermissionError) as e:
-                logging.error(f"Directory access denied: {e}")
+            except (OSError, PermissionError):
                 raise Exception(f"Cannot access directory '{normalized_path}'. Check permissions.")
-        
+
         return normalized_path
-        
     except Exception as e:
         logging.error(f"Path validation failed: {e}")
         raise
 
-def handle_cd_drive_compatibility():
-    """Handle compatibility issues with CD drives and frozen executables"""
-    if getattr(sys, 'frozen', False):
-        try:
-            # Change working directory to executable location for better compatibility
-            exe_dir = os.path.dirname(sys.executable)
-            original_cwd = os.getcwd()
-            
-            logging.info(f"Frozen executable detected")
-            logging.info(f"Executable location: {exe_dir}")
-            logging.info(f"Original working directory: {original_cwd}")
-            
-            # Only change if we're not already in the exe directory
-            if original_cwd != exe_dir:
-                os.chdir(exe_dir)
-                logging.info(f"Changed working directory to: {os.getcwd()}")
-            
-            # Set some environment variables that might help with drive access
-            os.environ['TEMP'] = os.environ.get('TEMP', tempfile.gettempdir())
-            os.environ['TMP'] = os.environ.get('TMP', tempfile.gettempdir())
-            
-        except Exception as e:
-            logging.warning(f"Could not optimize environment for frozen executable: {e}")
 
 def clean_input_path(raw_path):
-    """Clean up input path from command line arguments"""
     try:
-        logging.info(f"Cleaning raw input path: '{raw_path}'")
-
-        # Remove surrounding quotes if present
         cleaned_path = raw_path.strip('"\'')
-
-        # Only add backslash for drive roots (like "H:" or "C:")
-        # Don't add it for full paths with files or directories
         if len(cleaned_path) == 2 and cleaned_path[1] == ':':
-            # It's just a bare drive letter like "H:", add backslash
             cleaned_path = cleaned_path + '\\'
-            logging.info(f"Detected bare drive letter, corrected to: '{cleaned_path}'")
-        elif len(cleaned_path) == 3 and cleaned_path[1] == ':' and cleaned_path[2] == '\\':
-            # It's already a proper drive root like "H:\", leave it alone
-            logging.info(f"Detected drive root: '{cleaned_path}'")
-
-        logging.info(f"Cleaned path result: '{cleaned_path}'")
         return cleaned_path
-
-    except Exception as e:
-        logging.error(f"Error cleaning input path '{raw_path}': {e}")
+    except Exception:
         return raw_path
+
+
+def get_password_from_gui(parent_widget, description_text):
+    try:
+        password, ok = QInputDialog.getText(
+            parent_widget, 'Password Required',
+            f'Enter password for {description_text}:',
+            QLineEdit.Password
+        )
+        if ok and password:
+            return password.encode('utf-8')
+        elif ok and not password:
+            return b''
+        return None
+    except Exception as e:
+        logging.error(f"Error getting password from GUI: {e}")
+        return None
+
+
+# --- Main Application ---
 
 def main_app_logic():
     try:
-        # Handle CD drive compatibility first
-        handle_cd_drive_compatibility()
-        
-        cpu_cores = os.cpu_count() if os.cpu_count() is not None else 1
-        # Use more threads for I/O-bound operations (reading DICOM files from disk)
-        max_workers = min(cpu_cores * 4, 32)  # 4x CPU cores, max 32 threads 
-        logging.info(f"Using up to {max_workers} worker threads.")
-        logging.info(f"7zip available: {'Yes' if SEVEN_ZIP_PATH else 'No'}")
-        logging.info(f"Running as frozen executable: {'Yes' if getattr(sys, 'frozen', False) else 'No'}")
-        
+        if getattr(sys, 'frozen', False):
+            try:
+                os.chdir(APP_ROOT)
+            except Exception:
+                pass
+
+        engine_path = find_engine_binary()
+        if not engine_path:
+            show_error_popup(
+                "Engine binary (study-agg-engine.exe) not found. "
+                "Please reinstall the application."
+            )
+            return 1
+
         app = QApplication.instance() or QApplication(sys.argv)
 
-        # Apply Windows dark theme style
         app.setStyle("Fusion")
-        dark_palette = """
+        app.setStyleSheet("""
         QWidget {
             background-color: #202020;
             color: #ffffff;
             font-family: "Segoe UI", Arial, sans-serif;
             font-size: 9pt;
         }
-        QLabel {
-            color: #ffffff;
-            background-color: transparent;
-        }
-        QPushButton {
-            background-color: #2d2d2d;
-            color: #ffffff;
-            border: 1px solid #3f3f3f;
-            padding: 5px 15px;
-            border-radius: 3px;
-        }
-        QPushButton:hover {
-            background-color: #3d3d3d;
-            border: 1px solid #5f5f5f;
-        }
-        QPushButton:pressed {
-            background-color: #1d1d1d;
-        }
+        QLabel { color: #ffffff; background-color: transparent; }
         QProgressBar {
-            border: 1px solid #3f3f3f;
-            border-radius: 3px;
-            text-align: center;
-            background-color: #1a1a1a;
-            color: #ffffff;
+            border: 1px solid #3f3f3f; border-radius: 3px;
+            text-align: center; background-color: #1a1a1a; color: #ffffff;
         }
-        QProgressBar::chunk {
-            background-color: #0078d4;
-            border-radius: 2px;
-        }
-        QCheckBox {
-            color: #ffffff;
-            spacing: 5px;
-        }
-        QCheckBox::indicator {
-            width: 18px;
-            height: 18px;
-            border: 1px solid #3f3f3f;
-            border-radius: 3px;
-            background-color: #2d2d2d;
-        }
-        QCheckBox::indicator:checked {
-            background-color: #0078d4;
-            border: 1px solid #0078d4;
-        }
-        QCheckBox::indicator:hover {
-            border: 1px solid #5f5f5f;
-        }
-        QDialog {
-            background-color: #202020;
-        }
-        QMessageBox {
-            background-color: #202020;
-        }
+        QProgressBar::chunk { background-color: #0078d4; border-radius: 2px; }
+        QDialog { background-color: #202020; }
+        QMessageBox { background-color: #202020; }
         QLineEdit {
-            background-color: #2d2d2d;
-            color: #ffffff;
-            border: 1px solid #3f3f3f;
-            padding: 4px;
-            border-radius: 3px;
+            background-color: #2d2d2d; color: #ffffff;
+            border: 1px solid #3f3f3f; padding: 4px; border-radius: 3px;
         }
-        QLineEdit:focus {
-            border: 1px solid #0078d4;
-        }
-        """
-        app.setStyleSheet(dark_palette)
+        QLineEdit:focus { border: 1px solid #0078d4; }
+        """)
 
-        if len(sys.argv) < 2:
-            error_msg = "No input specified. Please drag and drop a directory or ZIP file onto this application, or run it from command line with a path argument."
-            logging.error("Usage: script.py <path_to_directory_or_zip_file>")
-            show_error_popup(error_msg)
+        raw_input_path = None
+        for arg in sys.argv:
+            cleaned = clean_input_path(arg)
+            if os.path.exists(cleaned):
+                raw_input_path = cleaned
+                break
+
+        if raw_input_path is None:
+            show_error_popup(
+                "No input specified. Please drag and drop a directory or ZIP file "
+                "onto this application, or run it from the command line with a path argument."
+            )
             return 1
-            
-        raw_input_path = sys.argv[1]
-        logging.info(f"Raw command line argument: '{raw_input_path}'")
-        
-        # Clean up the input path - ADD THIS LINE
-        input_path = clean_input_path(raw_input_path)
-        logging.info(f"Cleaned input path: '{input_path}'")
-        
-        # Add early CD drive debugging
-        debug_cd_drive_early(input_path)
-        
-        # Normalize and validate the path
+
+        input_path = raw_input_path
+        logging.info(f"Input path: '{input_path}'")
+
         try:
             validated_path = normalize_and_validate_path(input_path)
-            logging.info(f"Using validated path: '{validated_path}'")
         except Exception as path_error:
-            error_msg = str(path_error)
-            logging.error(f"Path validation failed: {error_msg}")
-            show_error_popup(error_msg)
+            show_error_popup(str(path_error))
             return 1
-            
+
         progress_dialog = ProgressDialog("Processing DICOM Files")
         progress_dialog.show()
 
-        processing_thread = ProcessingThread(validated_path, max_workers, progress_dialog)
-        
+        processing_thread = ProcessingThread(validated_path, engine_path, progress_dialog)
+
         def update_progress_slot(value, text):
             try:
                 if value == -1 and text == "Password":
                     progress_dialog.hide()
                     try:
-                        if os.path.isfile(processing_thread.input_path) and processing_thread.input_path.lower().endswith('.zip'):
-                            logging.info(f"Requesting password for single zip: {processing_thread.input_path}")
-                            password_bytes = get_password_from_gui(progress_dialog, f"encrypted ZIP: {os.path.basename(processing_thread.input_path)}")
-                            processing_thread.password_from_gui = password_bytes
+                        if os.path.isfile(validated_path) and validated_path.lower().endswith('.zip'):
+                            pw = get_password_from_gui(
+                                progress_dialog,
+                                f"encrypted ZIP: {os.path.basename(validated_path)}"
+                            )
                         else:
-                            logging.info("Requesting shared password for directory processing.")
-                            password_bytes = get_password_from_gui(progress_dialog, "any password-protected ZIP files in the directory")
-                            processing_thread.shared_password_from_gui = password_bytes
+                            pw = get_password_from_gui(
+                                progress_dialog,
+                                "any password-protected ZIP files in the directory"
+                            )
+                        processing_thread._password_received = pw
                     finally:
                         progress_dialog.show()
                 else:
                     progress_dialog.update_progress(value, text)
             except Exception as e:
                 logging.error(f"Error updating progress: {e}")
-        
+
         processing_thread.progress_updated.connect(update_progress_slot)
-        
+        processing_thread.set_busy.connect(lambda: app.setOverrideCursor(Qt.WaitCursor))
+        processing_thread.set_normal.connect(lambda: app.restoreOverrideCursor())
+
         def on_finished_slot(merged_patients):
-            logging.debug("on_finished_slot() called.")
+            logging.debug(f"Received {len(merged_patients)} patients from engine")
             try:
                 progress_dialog.update_progress(100, "Processing complete. Formatting results...")
-                logging.debug(f"Received merged_patients with {len(merged_patients)} entries")
-                logging.debug(f"Merged patients type: {type(merged_patients)}")
 
                 if not merged_patients:
-                    logging.warning("No patient data found after processing and filtering.")
-                    show_error_popup("Unable to aggregate DICOM studies: All extracted data contains insufficient patient identification information. Please manually inspect the source files to verify they contain valid DICOM headers with patient details.")
+                    show_error_popup(
+                        "No patient data found after processing. "
+                        "Please verify the source contains valid DICOM files."
+                    )
                     progress_dialog.close()
                     app.quit()
                     return
 
-                logging.debug("Patient data found. Beginning formatting.")
+                def sort_patients(patient_data):
+                    pid = patient_data.get('patient_id') or 'ZZZZ'
+                    name = patient_data.get('patient_name', 'Unknown')
+                    pid_val = pid.zfill(10) if pid.isdigit() else str(pid) if pid else 'ZZZZ'
+                    return (pid_val, name.lower())
 
-                # Hide progress dialog and show output mode selection
-                progress_dialog.hide()
-                output_dialog = OutputModeDialog()
-                if output_dialog.exec_() != QDialog.Accepted:
-                    logging.info("User cancelled output mode selection")
-                    progress_dialog.close()
-                    app.quit()
-                    return
+                sorted_patients = sorted(merged_patients.values(), key=sort_patients)
+                lines = []
 
-                to_clipboard, to_pdf = output_dialog.get_selection()
-                logging.info(f"Output mode selected - Clipboard: {to_clipboard}, PDF: {to_pdf}")
+                for patient in sorted_patients:
+                    pid = patient.get('patient_id', '')
+                    name = patient.get('patient_name', 'Unknown')
+                    dob = patient.get('patient_dob', 'Unknown')
 
-                if not to_clipboard and not to_pdf:
-                    show_error_popup("Please select at least one output option (Clipboard or PDF)")
-                    progress_dialog.close()
-                    app.quit()
-                    return
+                    display_name = f"NAME: {name} DOB: {dob}, ID: {pid or 'Unknown'}"
+                    lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
 
-                # Load settings
-                settings = load_settings()
-
-                # Generate text output for clipboard
-                output_text = None
-                if to_clipboard:
-                    # Sort patients by ID (treat all as strings for consistency), then by name
-                    def sort_patients(patient_data):
-                        try:
-                            pid = patient_data.get('patient_id') or 'ZZZZ'
-                            name = patient_data.get('patient_name', 'Unknown')
-
-                            # Convert all patient IDs to strings and pad numeric ones for proper sorting
-                            try:
-                                if pid and pid.isdigit():
-                                    pid_val = pid.zfill(10)
-                                else:
-                                    pid_val = str(pid) if pid else 'ZZZZ'
-                            except:
-                                pid_val = str(pid) if pid else 'ZZZZ'
-
-                            return (pid_val, name.lower())
-                        except Exception as e:
-                            logging.warning(f"Error sorting patient data: {e}")
-                            return ('ZZZZ', 'unknown')
-
-                    sorted_patients = sorted(merged_patients.values(), key=sort_patients)
-
-                    lines = []
-                    for patient in sorted_patients:
-                        try:
-                            pid = patient.get('patient_id', '')
-                            name = patient.get('patient_name', 'Unknown')
-                            dob = patient.get('patient_dob', 'Unknown')
-
-                            # Format patient header
-                            if pid:
-                                display_name = f"NAME: {name} DOB: {dob}, ID: {pid}"
-                            else:
-                                display_name = f"NAME: {name} DOB: {dob}, ID: Unknown"
-
-                            lines.extend([f"{display_name}\r\n", "STUDIES\r\n\r\n"])
-
-                            # Get studies dictionary
-                            studies_dict = patient.get('studies', {})
-                            logging.debug(f"Studies type: {type(studies_dict)}, count: {len(studies_dict)}")
-
-                            if isinstance(studies_dict, dict) and studies_dict:
-                                # Sort studies by date, then description
-                                sorted_studies = sorted(studies_dict.values(),
-                                                    key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', '')))
-
-                                for study in sorted_studies:
-                                    study_date = study.get('study_date', 'Unknown')
-                                    study_desc = study.get('study_description', 'Unknown')
-
-                                    # Get all series in this study (regardless of modality)
-                                    all_series = study.get('all_series', set())
-                                    series_count = len(all_series)
-
-                                    if series_count > 0:
-                                        line = f"{study_date} {study_desc} ({series_count} series)\r\n"
-                                        lines.append(line)
-                                    else:
-                                        lines.append(f"{study_date} {study_desc}\r\n")
-
-                            lines.append("\r\n" + "="*50 + "\r\n\r\n")
-                        except Exception as e:
-                            logging.error(f"Error formatting patient data: {e}")
-                            continue
-
-                    if not lines:
-                        show_error_popup("Unable to aggregate DICOM studies: No valid patient data could be formatted for output. Please manually inspect the source files.")
-                        progress_dialog.close()
-                        app.quit()
-                        return
-
-                    output_text = "".join(lines)
-                    logging.debug(f"Final output preview: {output_text[:500]}...")
-
-                # Handle PDF output
-                pdf_count = 0
-                if to_pdf:
-                    logging.info("=== PDF GENERATION STARTED ===")
-                    try:
-                        patient_list = list(merged_patients.values())
-                        num_patients = len(patient_list)
-
-                        # Derive default filename from input path
-                        input_basename = os.path.splitext(os.path.basename(validated_path))[0]
-                        if not input_basename:
-                            input_basename = "DICOM_Report"
-
-                        # Notify user if multiple patients found
-                        if num_patients > 1:
-                            info_msg = QMessageBox()
-                            info_msg.setIcon(QMessageBox.Information)
-                            info_msg.setWindowTitle("Multiple Patients")
-                            info_msg.setText(
-                                f"{num_patients} patients were found.\n"
-                                "A separate PDF will be created for each patient."
-                            )
-                            info_msg.exec_()
-
-                        # Get save directory from settings
-                        default_dir = settings.get('last_save_directory', str(Path.home() / "Desktop"))
-                        if not os.path.exists(default_dir):
-                            default_dir = str(Path.home() / "Desktop")
-
-                        default_filename = f"{input_basename}.pdf"
-
-                        progress_dialog.show()
-                        progress_dialog.raise_()
-                        progress_dialog.activateWindow()
-
-                        file_path, _ = QFileDialog.getSaveFileName(
-                            progress_dialog,
-                            "Save DICOM Report",
-                            os.path.join(default_dir, default_filename),
-                            "PDF Files (*.pdf);;All Files (*.*)",
-                            options=QFileDialog.DontUseNativeDialog
+                    studies_dict = patient.get('studies', {})
+                    if isinstance(studies_dict, dict) and studies_dict:
+                        sorted_studies = sorted(
+                            studies_dict.values(),
+                            key=lambda x: (x.get('study_date', 'Unknown'), x.get('study_description', ''))
                         )
-
-                        if not file_path:
-                            logging.info("User cancelled file save dialog")
-                            if not to_clipboard:
-                                progress_dialog.close()
-                                app.quit()
-                                return
-                        else:
-                            # Save directory for next time
-                            save_dir = os.path.dirname(file_path)
-                            settings['last_save_directory'] = save_dir
-                            save_settings(settings)
-
-                            if num_patients == 1:
-                                # Single patient — use exact filename
-                                result = save_patient_data_as_pdf(patient_list[0], file_path)
-                                if result:
-                                    pdf_count = 1
-                                else:
-                                    show_error_popup("Failed to generate PDF report.")
+                        for study in sorted_studies:
+                            study_date = study.get('study_date', 'Unknown')
+                            study_desc = study.get('study_description', 'Unknown')
+                            all_series = study.get('all_series', set())
+                            series_count = len(all_series)
+                            if series_count > 0:
+                                lines.append(f"{study_date} {study_desc} ({series_count} series)\r\n")
                             else:
-                                # Multiple patients — append patient name to filename
-                                base_path_no_ext = os.path.splitext(file_path)[0]
-                                for patient in patient_list:
-                                    pname = patient.get('patient_name', 'Unknown')
-                                    safe_name = "".join(
-                                        c for c in pname if c.isalnum() or c in (' ', '-', '_')
-                                    ).strip()
-                                    patient_path = f"{base_path_no_ext} - {safe_name}.pdf"
-                                    result = save_patient_data_as_pdf(patient, patient_path)
-                                    if result:
-                                        pdf_count += 1
+                                lines.append(f"{study_date} {study_desc}\r\n")
 
-                                if pdf_count == 0:
-                                    show_error_popup("Failed to generate PDF reports.")
-                                else:
-                                    logging.info(f"Generated {pdf_count}/{num_patients} PDF(s)")
+                    lines.append("\r\n" + "=" * 50 + "\r\n\r\n")
 
-                    except Exception as pdf_error:
-                        logging.error(f"Exception in PDF generation: {pdf_error}", exc_info=True)
-                        show_error_popup(f"Error saving PDF: {str(pdf_error)}")
-                    finally:
-                        logging.info("=== PDF GENERATION ENDED ===")
+                output_text = "".join(lines) if lines else None
 
-                # Copy to clipboard if selected
-                if to_clipboard and output_text:
+                progress_dialog.close()
+
+                if output_text:
                     try:
                         clipboard.copy(output_text)
-                        logging.info("Results copied to clipboard")
-                    except Exception as clipboard_error:
-                        logging.error(f"Failed to copy to clipboard: {clipboard_error}")
-                        show_error_popup(f"Failed to copy results to clipboard: {str(clipboard_error)}")
-
-                # Show success message
-                progress_dialog.close()
-                success_messages = []
-                if to_clipboard and output_text:
-                    success_messages.append("copied to clipboard")
-                if pdf_count == 1:
-                    success_messages.append("saved as PDF")
-                elif pdf_count > 1:
-                    success_messages.append(f"saved as {pdf_count} PDFs")
-
-                if success_messages:
-                    msg = f"DICOM study information has been successfully {' and '.join(success_messages)}!"
-                    show_success_popup(msg)
+                        show_success_popup(
+                            "DICOM study information has been copied to your clipboard."
+                        )
+                    except Exception as e:
+                        logging.error(f"Clipboard error: {e}")
+                        show_error_popup(f"Failed to copy to clipboard: {e}")
+                else:
+                    show_error_popup("No study information to copy.")
 
                 app.quit()
 
-            except Exception as e_format:
-                error_msg = handle_critical_error(e_format, "result formatting")
-                logging.error(f"Error in on_finished_slot: {e_format}", exc_info=True)
+            except Exception as e:
+                error_msg = handle_critical_error(e, "result formatting")
                 progress_dialog.close()
                 show_error_popup(f"Error formatting results: {error_msg}")
                 app.quit()
 
         def on_error_slot(error_message):
-            logging.error(f"Processing error signal received: {error_message}")
+            logging.error(f"Processing error: {error_message}")
             progress_dialog.close()
             show_error_popup(error_message)
             app.quit()
-        
+
         processing_thread.finished_signal.connect(on_finished_slot)
         processing_thread.error_signal.connect(on_error_slot)
-        
-        logging.info(f"Starting processing thread for input: {validated_path}")  # Use validated_path here too
+
+        logging.info(f"Starting engine for: {validated_path}")
         processing_thread.start()
         return app.exec_()
-        
+
     except Exception as e:
         error_msg = handle_critical_error(e, "application startup")
-        logging.critical(f"Critical error in main_app_logic: {e}", exc_info=True)
         try:
             show_error_popup(f"Critical application error: {error_msg}")
-        except:
+        except Exception:
             print(f"CRITICAL ERROR: {error_msg}", file=sys.stderr)
         return 1
 
-def profile_main():
-    start_time = time.time()
-
-    try:
-        setup_logging()
-        logging.info("Using strategic garbage collection for optimized performance.")
-        exit_code = main_app_logic()
-        total_duration = time.time() - start_time
-        logging.info(f"Total execution time: {total_duration:.2f} seconds")
-        return exit_code
-    except Exception as e:
-        error_msg = handle_critical_error(e, "application execution")
-        logging.critical(f"Critical error in profile_main: {e}", exc_info=True)
-        try:
-            show_error_popup(f"Application failed to start: {error_msg}")
-        except:
-            print(f"CRITICAL ERROR: {error_msg}", file=sys.stderr)
-        return 1
 
 if __name__ == "__main__":
     try:
         if sys.platform.startswith('win'):
             import multiprocessing
             multiprocessing.freeze_support()
-        final_exit_code = profile_main()
-        logging.info("Application finished.")
-        sys.exit(final_exit_code)
+        sys.exit(main_app_logic())
     except Exception as e:
-        # Ultimate fallback for any unhandled exceptions
-        error_msg = f"Fatal application error: {str(e)}"
-        print(error_msg, file=sys.stderr)
-        try:
-            logging.critical(error_msg, exc_info=True)
-        except:
-            pass
+        print(f"Fatal application error: {e}", file=sys.stderr)
         sys.exit(1)
-        

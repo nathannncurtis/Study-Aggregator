@@ -1,16 +1,16 @@
-\.git
+.git
 *.log
 __pycache__
 *.swp
-build\
-Output
+*.zip
 *.pdf
 /.claude
 /.vscode
 /build
-*.zip
-/625874-03 Dovolis
-"625874-03 Dovolis.zip"
+/dist
+/Output
 dicom_aggregator_settings.json
-update.md
-/update-tester
+
+# Rust build artifacts
+/engine/target/
+/study-agg-engine.exe

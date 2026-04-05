@@ -1,0 +1,12 @@
+*.zip
+*.log
+*.db
+engine/
+dist/
+Output/
+dicom_aggregator_settings.json
+build.bat
+StudyAggSetup.iss
+req.txt
+.coilignore
+.github/

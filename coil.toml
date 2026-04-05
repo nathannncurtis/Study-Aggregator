@@ -1,0 +1,16 @@
+[project]
+name = "Study Aggregator"
+entry = "Study Aggregator.py"
+
+[build]
+mode = "bundled"
+os = "windows"
+python = "3.12"
+
+[build.dependencies]
+auto = true
+include = ["PyQt5", "clipboard"]
+
+[build.output]
+dir = "./dist"
+icon = "agg.ico"

@@ -1,95 +1,95 @@
 # Study Aggregator
 
-A Windows desktop application for processing, organizing, and aggregating DICOM medical imaging studies. Study Aggregator reads DICOM files from directories, ZIP archives, and optical drives, then generates organized patient reports via clipboard or PDF.
+A fast Windows desktop tool for extracting and summarizing DICOM study metadata from folders, ZIP archives, and optical drives. Results are copied to your clipboard as a formatted report.
+
+As of **v4.0**, the DICOM parsing hot path is implemented in Rust and runs as a native subprocess, delivering roughly a **100-400x** speedup over the previous pydicom-based implementation on typical office hardware.
 
 ## Features
 
-- **DICOM Processing** - Reads and extracts metadata from DICOM files (.dcm, .ima, .dicom, extensionless)
-- **ZIP Archive Support** - Handles encrypted (AES & traditional) and unencrypted ZIP files with nested archive support up to 10 levels deep
-- **Patient Merging** - Intelligently groups studies by patient using ID, name, and DOB matching with conflict detection
-- **Multiple Output Formats** - Export as formatted clipboard text or PDF reports using a fillable template
-- **Context Menu Integration** - Right-click "Study Aggregator" option on files, folders, drives, and ZIP files
-- **CD/Drive Support** - Reads from optical drives, network drives, and removable media
-- **Auto Updates** - Daily scheduled update checks against GitHub releases with automatic download
-- **Multi-threaded** - Parallel DICOM processing (4x CPU cores, max 32 threads) for fast file scanning
+- **Native Rust DICOM engine** - zero-copy memory-mapped tag extraction, no Python per-file overhead
+- **Parallel processing** - directory walking (jwalk) and DICOM parsing (rayon) use every CPU core
+- **ZIP archive support** - unencrypted and encrypted (AES + traditional) ZIPs, nested archives, streamed parsing so multi-gigabyte archives don't balloon RAM
+- **Patient merging** - groups studies by patient via ID and normalized name matching with DOB conflict detection
+- **Handles non-conformant DICOMs** - implicit/explicit VR, missing preamble, truncated files, undefined-length sequences, private tags
+- **Clipboard output** - formatted patient/study report ready to paste into any application
+
+## Architecture
+
+```
+PyQt5 GUI  ->  subprocess  ->  study-agg-engine.exe  (Rust)
+           <-  stderr: progress JSON lines
+           <-  stdout: final result JSON
+```
+
+The Python wrapper handles UI, input/password prompts, and clipboard. Everything performance-sensitive lives in the Rust engine under `engine/`.
 
 ## Installation
 
-Download the latest `StudyAggregatorSetup.exe` from [GitHub Releases](https://github.com/nathannncurtis/Study-Aggregator/releases) and run the installer.
-
-The installer will:
-- Install to `%APPDATA%\Study Aggregator`
-- Register Windows context menu entries
-- Create a daily scheduled task for update checks
+Download the latest `StudyAggregatorSetup.exe` from the [Releases](https://github.com/nathannncurtis/Study-Aggregator/releases) page and run it. The installer places the app in `%APPDATA%\Study Aggregator` and optionally creates a desktop shortcut.
 
 ## Usage
 
-**Right-click** any folder, ZIP file, or drive in Windows Explorer and select **Study Aggregator** from the context menu.
-
-Or run from the command line:
+Drag and drop a folder, ZIP file, or drive onto `Study Aggregator.exe`, or run from the command line:
 
 ```
 "Study Aggregator.exe" <path_to_directory_or_zip>
 ```
 
-On launch you'll be prompted to choose an output mode:
-- **Clipboard** - Copies a formatted text report to clipboard
-- **PDF** - Generates a PDF report saved to your chosen directory
-- **Both** - Produces both outputs
+When processing finishes, a formatted report is copied to your clipboard and a confirmation dialog appears.
 
-## Development Setup
+## Building from Source
 
 **Requirements:**
-- Python 3.13
+- Python 3.12
+- Rust (stable toolchain) - install via [rustup](https://rustup.rs/)
 - Windows
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) (for installer compilation)
 
-**Install dependencies:**
+**Steps:**
 
-```
+```cmd
 pip install -r req.txt
+pip install coil-compiler
+build.bat
 ```
 
-**Run from source:**
+`build.bat` compiles the Rust engine (`cargo build --release`), bundles the Python app with Coil, and copies the engine binary into `dist\Study Aggregator\`. After it finishes, open `StudyAggSetup.iss` in Inno Setup to produce `Output\StudyAggregatorSetup.exe`.
 
-```
+**Run from source (without bundling):**
+
+```cmd
+cd engine && cargo build --release && cd ..
 python "Study Aggregator.py" <path>
 ```
 
-**Build executable:**
-
-```
-python setup.py build
-```
-
-The frozen executable is output to `build/exe.win-amd64-3.13/`. Use [Inno Setup](https://jrsoftware.org/isinfo.php) with `StudyAggSetup.iss` to compile the installer.
-
 ## Project Structure
 
-| File | Description |
+| Path | Description |
 |---|---|
-| `Study Aggregator.py` | Main application |
-| `setup.py` | cx_Freeze build configuration |
-| `build.bat` | Build and code signing script |
-| `reg.py` | Register context menu and update scheduler |
-| `unreg.py` | Unregister context menu entries |
-| `update_checker.py` | Standalone update checker utility |
-| `bd.pdf` | PDF report template |
-| `req.txt` | Python dependencies |
+| `Study Aggregator.py` | PyQt5 GUI wrapper |
+| `engine/` | Rust DICOM engine (Cargo crate) |
+| `engine/src/dicom.rs` | Zero-copy mmap DICOM parser |
+| `engine/src/zip_handler.rs` | Streaming ZIP extraction |
+| `engine/src/patient.rs` | Patient merging and name normalization |
+| `coil.toml` | Coil bundling configuration |
+| `build.bat` | Full build script |
 | `StudyAggSetup.iss` | Inno Setup installer script |
-| `version.txt` | Current version number |
+| `req.txt` | Python dependencies |
+| `version.txt` | Current version |
 
 ## Dependencies
 
-- [PyQt5](https://pypi.org/project/PyQt5/) - GUI framework
-- [pydicom](https://pypi.org/project/pydicom/) - DICOM file parsing
-- [pypdf](https://pypi.org/project/pypdf/) - PDF template filling
-- [reportlab](https://pypi.org/project/reportlab/) - PDF generation
-- [pyzipper](https://pypi.org/project/pyzipper/) - Encrypted ZIP handling
-- [numpy](https://pypi.org/project/numpy/) - Required by pydicom
-- [clipboard](https://pypi.org/project/clipboard/) - Clipboard access
+**Python:**
+- [PyQt5](https://pypi.org/project/PyQt5/) - GUI
+- [clipboard](https://pypi.org/project/clipboard/) - clipboard access
 
-**Optional:** [7-Zip](https://www.7-zip.org/) - Preferred for ZIP extraction (falls back to pyzipper)
+**Rust (see `engine/Cargo.toml`):**
+- `memmap2` - memory-mapped file I/O
+- `zip` - archive handling
+- `jwalk` - parallel directory walking
+- `rayon` - data parallelism
+- `clap`, `serde`, `serde_json`, `tempfile`, `base64`
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE).
