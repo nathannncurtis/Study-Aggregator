@@ -1,0 +1,79 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('engine/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Write version.txt
+        shell: bash
+        run: echo "${{ steps.version.outputs.VERSION }}" > version.txt
+
+      - name: Build Rust engine
+        shell: cmd
+        working-directory: engine
+        run: cargo build --release
+
+      - name: Copy engine binary to project root
+        shell: cmd
+        run: copy /Y "engine\target\release\study-agg-engine.exe" "study-agg-engine.exe"
+
+      - name: Install dependencies
+        run: pip install coil-compiler
+
+      - name: Build with Coil
+        run: coil build . --entry "Study Aggregator.py" --mode bundled
+
+      - name: Copy engine binary into dist
+        shell: cmd
+        run: copy /Y "study-agg-engine.exe" "dist\Study Aggregator\study-agg-engine.exe"
+
+      - name: Compile installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.5
+        with:
+          path: StudyAggSetup.iss
+          options: /DMyAppVersion=${{ steps.version.outputs.VERSION }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/StudyAggregatorSetup.exe
+          name: Study Aggregator v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Study Aggregator v${{ steps.version.outputs.VERSION }}
+
+            Download and run `StudyAggregatorSetup.exe` to install.
